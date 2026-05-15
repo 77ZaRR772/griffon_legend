@@ -1595,6 +1595,9 @@ void game_damagenpc(int npcnum, int damage, int spell)
 	int fcol, heal, ff;
 
 	if(damage == 0) {
+		// FIX: no more than once every 400ms per enemy
+		if (npcinfo[npcnum].lastmisstick > ticks) return;
+		npcinfo[npcnum].lastmisstick = ticks + 400;
 		strcpy(line, "miss!");
 		fcol = 2;
 	} else {

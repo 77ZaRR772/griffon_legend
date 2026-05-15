@@ -1,0 +1,28 @@
+# Makefile.linux
+# For arch, do:
+
+# sudo pacman -S sdl12-compat sdl_image sdl_mixer sdl_gfx pkgconf base-devel
+
+# and this "one line" cmd:
+# PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig" \
+# make -f makefile.linux
+
+CC = gcc
+CFLAGS = -O2 -Wall -Wextra -std=c99 `pkg-config --cflags sdl SDL_image SDL_mixer SDL_gfx`
+LDFLAGS = `pkg-config --libs sdl SDL_image SDL_mixer SDL_gfx` -lm
+OBJS = griffon.o config.o state.o
+TARGET = griffon
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	mkdir -p build
+	$(CC) $(OBJS) $(LDFLAGS) -o build/$@
+
+%.o: %.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+clean:
+	rm -f $(OBJS) build/$(TARGET)
+
+.PHONY: all clean

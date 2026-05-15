@@ -156,6 +156,7 @@ typedef struct {
 
 	// dragon2 specific
 	float	floating;
+	int lastmisstick;  // cooldown for "miss", fixing spam of text and sound
 } NPCTYPE;
 
 typedef struct {

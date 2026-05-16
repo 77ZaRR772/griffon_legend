@@ -1605,12 +1605,12 @@ void game_damagenpc(int npcnum, int damage, int spell)
 
 	if(damage == 0) {
     int source_flag = spell ? 0x10000 : 0;
-
     if (npcinfo[npcnum].lastmisstick > (ticks & 0xFFFF) &&
         (npcinfo[npcnum].lastmisstick & 0x10000) == source_flag) {
         return;
     }
     npcinfo[npcnum].lastmisstick = (ticks & 0xFFFF) | source_flag;
+
 		strcpy(line, "miss!");
 		fcol = 2;
 	} else {
@@ -6904,7 +6904,7 @@ void game_updspells()
 
 					game_eventtext(line);
 
-					int heal = 80;
+					int heal = player.maxhp / 2;
 					int maxh = player.maxhp - player.hp;
 
 					if(heal > maxh) heal = maxh;

@@ -1595,9 +1595,6 @@ void game_configmenu()
 	SDL_SetAlpha(cloudimg, SDL_SRCALPHA, 64);
 }
 
-
-static int npc_feedback_tick[MAXNPC] = {0};
-
 void game_damagenpc(int npcnum, int damage, int spell)
 {
 	float npx, npy;
@@ -1608,7 +1605,6 @@ void game_damagenpc(int npcnum, int damage, int spell)
 
 	if(damage == 0) {
     int source_flag = spell ? 0x10000 : 0;
-    int combined = (ticks & ~0xFFFF) | source_flag;
 
     if (npcinfo[npcnum].lastmisstick > (ticks & 0xFFFF) &&
         (npcinfo[npcnum].lastmisstick & 0x10000) == source_flag) {
@@ -2040,6 +2036,19 @@ void game_damageplayer(int damage)
 {
 	char line[256];
 
+	//improvement to gameplay? Easier near ending..
+	int total_def = player.shield + player.armour;
+
+	for (int i = 0; i < total_def; i++) {
+		// removing 5% from current received dmg
+		// *95/100 to avoid fractions
+		damage = (damage * 95) / 100;
+
+		if (damage < 1) {
+			damage = 1;
+		}
+	}
+
 	player.hp -= damage;
 	if(player.hp < 0) player.hp = 0;
 
@@ -2049,6 +2058,10 @@ void game_damageplayer(int damage)
 	game_addFloatText(line, player.px + 12 - 4 * strlen(line), player.py + 16, 4);
 
 	player.pause = ticks + 1000;
+
+	//printf("Player shield/armor: %i/%i\n", player.shield, player.armour);
+	//printf("Player total_def: %i\n", total_def);
+	//sprintf(line, "Player shield/armor: %i/%i\n", player.shield, player.armour);
 }
 
 void game_drawanims(int Layer)
@@ -6872,6 +6885,8 @@ void game_updspells()
 						}
 					}
 
+
+
 					char line[256];
 					strcpy(line, "Found... nothing...");
 
@@ -6888,6 +6903,23 @@ void game_updspells()
 					}
 
 					game_eventtext(line);
+
+					int heal = 80;
+					int maxh = player.maxhp - player.hp;
+
+					if(heal > maxh) heal = maxh;
+
+					player.hp = player.hp + heal;
+
+					char text[256];
+					sprintf(text, "+%i", heal);
+					game_addFloatText(text, player.px + 16 - 4 * strlen(text), player.py + 16, 5);
+
+					if(menabled == 1 && config.effects == 1) {
+						int snd = Mix_PlayChannel(-1, sfx[sndpowerup], 0);
+						Mix_Volume(snd, config.effectsvol);
+					}
+
 				}
 			}
 

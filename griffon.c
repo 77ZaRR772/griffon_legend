@@ -30,6 +30,12 @@
 #include "config.h"
 #include "state.h"
 
+// fix float warnings
+#undef abs
+#undef fabsf
+#define abs(x) ((x) < 0 ? -(x) : (x))
+#define fabsf(x) ((x) < 0 ? -(x) : (x))
+
 // memo 
 /*
  in game scripts
@@ -384,6 +390,8 @@ do {					\
 
 void sdl_blitscale(SDL_Surface *src, SDL_Rect *srcrect, SDL_Surface *dst, SDL_Rect *dstrect)
 {
+	(void)srcrect;
+    (void)dstrect;
 	if(src->w != dst->w) {
 		SDL_Surface *scale2x = NULL;
 
@@ -4675,7 +4683,7 @@ void game_processtrigger(int trignum)
 
 void game_saveloadnew()
 {
-	float y; int yy;
+	float y = 0; int yy;
 	int currow, curcol, lowerlock;
 	int ticks, ticks1, tickpause;
 

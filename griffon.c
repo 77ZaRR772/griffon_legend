@@ -5350,49 +5350,50 @@ void game_updatey()
 
 void game_updmusic()
 {
-	Mix_Chunk *iplaysound = NULL;
+    Mix_Chunk *iplaysound = NULL;
 
-	if(menabled == 1 && config.music == 1) {
+    if(menabled == 1 && config.music == 1) {
 
-		// if(curmap > 5 && curmap < 42) iplaysound = macademy;
-		// if(curmap > 47) iplaysound = mgardens;
-		iplaysound = mgardens;
-		if(roomlock == 1) iplaysound = mboss;
+        iplaysound = mgardens;
+        if(roomlock == 1) iplaysound = mboss;
 
-		if(iplaysound == mboss && pboss) iplaysound = NULL;
-		if(iplaysound == mgardens && pgardens) iplaysound = NULL;
+        if(iplaysound == mboss && pboss) iplaysound = NULL;
+        if(iplaysound == mgardens && pgardens) iplaysound = NULL;
 
-		if(iplaysound != NULL) {
-			Mix_HaltChannel(musicchannel);
+        if(iplaysound != NULL) {
+            Mix_HaltChannel(musicchannel);
 
-			pboss = 0;
-			pgardens = 0;
-			ptown = 0;
-			pacademy = 0;
-			pcitadel = 0;
+            pboss = 0;
+            pgardens = 0;
+            ptown = 0;
+            pacademy = 0;
+            pcitadel = 0;
 
-			if(iplaysound == mboss) pboss = 1;
-			if(iplaysound == mgardens) pgardens = 1;
+            if(iplaysound == mboss) pboss = 1;
+            if(iplaysound == mgardens) pgardens = 1;
 
-			musicchannel = Mix_PlayChannel(-1, iplaysound, -1);
-			Mix_Volume(musicchannel, config.musicvol);
-		} else {
-			if(!Mix_Playing(musicchannel)) {
-				loopseta = loopseta + 1;
-				if(loopseta == 4) loopseta = 0;
+            if(pgardens == 1) {
+                loopseta = 0;
+                musicchannel = Mix_PlayChannel(-1, mgardens, 0);
+            } else {
+                musicchannel = Mix_PlayChannel(-1, iplaysound, -1);
+            }
+            Mix_Volume(musicchannel, config.musicvol);
+        } else {
+            if(pgardens == 1) {
+                if(!Mix_Playing(musicchannel)) {
+                    loopseta = (loopseta + 1) % 4;
 
-				if(pgardens == 1) {
-					Mix_HaltChannel(musicchannel);
-					if(pgardens == 1 && loopseta == 0) musicchannel = Mix_PlayChannel(-1, mgardens, 0);
-					if(pgardens == 1 && loopseta == 1) musicchannel = Mix_PlayChannel(-1, mgardens2, 0);
-					if(pgardens == 1 && loopseta == 2) musicchannel = Mix_PlayChannel(-1, mgardens3, 0);
-					if(pgardens == 1 && loopseta == 3) musicchannel = Mix_PlayChannel(-1, mgardens4, 0);
-				}
+                    if(loopseta == 0) musicchannel = Mix_PlayChannel(-1, mgardens, 0);
+                    if(loopseta == 1) musicchannel = Mix_PlayChannel(-1, mgardens2, 0);
+                    if(loopseta == 2) musicchannel = Mix_PlayChannel(-1, mgardens3, 0);
+                    if(loopseta == 3) musicchannel = Mix_PlayChannel(-1, mgardens4, 0);
 
-				Mix_Volume(musicchannel, config.musicvol);
-			}
-		}
-	}
+                    Mix_Volume(musicchannel, config.musicvol);
+                }
+            }
+        }
+    }
 }
 
 void game_updnpcs()

@@ -1342,6 +1342,7 @@ void game_configmenu()
 				"Exit + Save", "",
 				"Exit"
 			};
+
 			static char line[24];
 
 			if(i == 15 || i == 17) {
@@ -1594,6 +1595,9 @@ void game_configmenu()
 	SDL_SetAlpha(cloudimg, SDL_SRCALPHA, 64);
 }
 
+
+static int npc_feedback_tick[MAXNPC] = {0};
+
 void game_damagenpc(int npcnum, int damage, int spell)
 {
 	float npx, npy;
@@ -1603,9 +1607,14 @@ void game_damagenpc(int npcnum, int damage, int spell)
 	int fcol, heal, ff;
 
 	if(damage == 0) {
-		// FIX: no more than once every 400ms per enemy
-		if (npcinfo[npcnum].lastmisstick > ticks) return;
-		npcinfo[npcnum].lastmisstick = ticks + 400;
+    int source_flag = spell ? 0x10000 : 0;
+    int combined = (ticks & ~0xFFFF) | source_flag;
+
+    if (npcinfo[npcnum].lastmisstick > (ticks & 0xFFFF) &&
+        (npcinfo[npcnum].lastmisstick & 0x10000) == source_flag) {
+        return;
+    }
+    npcinfo[npcnum].lastmisstick = (ticks & 0xFFFF) | source_flag;
 		strcpy(line, "miss!");
 		fcol = 2;
 	} else {

@@ -2036,18 +2036,8 @@ void game_damageplayer(int damage)
 {
 	char line[256];
 
-	//improvement to gameplay? Easier near ending..
-	int total_def = player.shield + player.armour;
-
-	for (int i = 0; i < total_def; i++) {
-		// removing 5% from current received dmg
-		// *95/100 to avoid fractions
-		damage = (damage * 95) / 100;
-
-		if (damage < 1) {
-			damage = 1;
-		}
-	}
+	//improvement. Now shield and armour gives defense bonus. No more intense hard grinding.
+	damage = (damage - (damage * (player.shield + player.armour) / 20) > 1) ? damage - (damage * (player.shield + player.armour) / 20) : 1;
 
 	player.hp -= damage;
 	if(player.hp < 0) player.hp = 0;
@@ -4705,6 +4695,8 @@ void game_processtrigger(int trignum)
 
 void game_saveloadnew()
 {
+
+	itemselon = 0;
 	float y = 0; int yy;
 	int currow, curcol, lowerlock;
 	int ticks, ticks1, tickpause;

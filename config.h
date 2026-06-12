@@ -19,6 +19,8 @@
 #define _CONFIG_H_
 
 typedef struct {
+	int showdbginfo;
+	int showlogos;
 	int scr_width;
 	int scr_height;
 	int scr_bpp;

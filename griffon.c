@@ -210,11 +210,40 @@ int ysort[2401], lasty, firsty;
 
 int pmenu;
 
+void sys_tickcalc() {
+    int old_ticks = ticks;
+    ticks = SDL_GetTicks();
+    tickspassed = ticks - old_ticks;
+
+    // fps limit 60 (1000/60 ≈ 16.67 ms)
+    if (tickspassed < 16) {
+        SDL_Delay(16 - tickspassed);
+
+        // Updating ticks and tickspassed after
+        ticks = SDL_GetTicks();
+        tickspassed = ticks - old_ticks;
+    }
+
+    // safe trick protection of divide to zero..
+    if (tickspassed == 0) tickspassed = 1;
+
+    fpsr = (float)tickspassed / 24.0; // 24 frames for simulating 30 fps yet holding 60fps.
+
+    fp++;
+    if(ticks > nextticks) {
+        nextticks = ticks + 1000;
+        fps = fp;
+        fp = 0;
+    }
+}
+
+
 #undef main
 int main()
 {
 	sys_initialize();
-	game_showlogos();
+    //temp removed.. it works with new cfg var..
+	//game_showlogos();
 	game_main();
 
 	return 0;
@@ -1273,7 +1302,6 @@ void game_configmenu()
 
 	cursel = MINCURSEL;
 
-	ticks = SDL_GetTicks();
 	tickwait = 100;
 	keypause = ticks + tickwait;
 
@@ -1402,18 +1430,7 @@ void game_configmenu()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		itemyloc += 0.75 * fpsr;
 		while(itemyloc >= 16) itemyloc -= 16;
@@ -1586,7 +1603,7 @@ void game_configmenu()
 		clouddeg += 0.01 * fpsr;
 		while(clouddeg >= 360) clouddeg = clouddeg - 360;
 
-		SDL_Delay(10);
+		SDL_Delay(5);
 	} while(1);
 
 	SDL_FreeSurface(configwindow);
@@ -2146,8 +2163,11 @@ int hud_recalc(int a, int b, int c)
 void game_drawhud()
 {
 	char line[128];
-	//sprintf(line, "fps: %i, map: %i, exp: %i/%i", (int)fps, curmap, player.exp, player.nextlevel);
-	//sys_print(videobuffer, line, 0, 0, 0);
+
+	if (config.showdbginfo == 1) {
+		sprintf(line,  "fps: %i, map: %i, exp: %i/%i ", (int)fps, curmap, player.exp, player.nextlevel);
+		sys_print(videobuffer, line, 0, 0, 0);
+	}
 
 	long ccc;
 
@@ -3130,7 +3150,7 @@ void game_endofgame()
 	float xofs = 0;
 	int ticks1;
 
-	ticks = SDL_GetTicks();
+	//ticks = SDL_GetTicks();
 
 	float spd = 0.2;
 
@@ -3178,18 +3198,7 @@ void game_endofgame()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 	} while(1);
 
 	ticks1 = ticks;
@@ -3234,18 +3243,7 @@ void game_endofgame()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		float add = 0.5 * fpsr;
 		if(add > 1) add = 1;
@@ -3287,18 +3285,7 @@ void game_endofgame()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 	} while(1);
 
 
@@ -3324,18 +3311,7 @@ void game_endofgame()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		SDL_PollEvent(&event);
 		keys = SDL_GetKeyState(NULL);
@@ -3360,7 +3336,6 @@ void game_eventtext(char *stri)
 
 	x = 160 - 4 * strlen(stri);
 
-	ticks = SDL_GetTicks();
 	pauseticks = ticks + 500;
 	bticks = ticks;
 
@@ -3390,18 +3365,7 @@ void game_eventtext(char *stri)
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24.0;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		SDL_Delay(10);
 	} while(1);
@@ -4429,6 +4393,7 @@ void game_loadmap(int mapnum)
 
 void game_main()
 {
+	game_showlogos();
 	game_title(0);
 	game_saveloadnew();
 }
@@ -4437,12 +4402,10 @@ void game_newgame()
 {
 	float xofs = 0;
 	float ld = 0, add;
-	int ticks, cnt = 0;
+	int cnt = 0;
 
 	SDL_FillRect(videobuffer2, NULL, 0);
 	SDL_FillRect(videobuffer3, NULL, 0);
-
-	ticks = SDL_GetTicks();
 
 	SDL_BlitSurface(videobuffer, NULL, videobuffer3, NULL);
 	SDL_BlitSurface(videobuffer, NULL, videobuffer2, NULL);
@@ -4501,18 +4464,7 @@ void game_newgame()
 		SDL_BLITVIDEO(videobuffer, NULL, video, NULL);
 		SDL_Flip(video);
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24.0;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		add = 0.5 * fpsr;
 		if(add > 1) add = 1;
@@ -4525,7 +4477,7 @@ void game_newgame()
 		if(event.type == SDL_KEYDOWN) cnt = 6;
 		if(keys[SDLK_ESCAPE] || keys[SDLK_LALT]) goto __exit_do;
 
-		SDL_Delay(10);
+		SDL_Delay(5);
 	} while(1);
 __exit_do:
 
@@ -4699,7 +4651,7 @@ void game_saveloadnew()
 	itemselon = 0;
 	float y = 0; int yy;
 	int currow, curcol, lowerlock;
-	int ticks, ticks1, tickpause;
+	int ticks1, tickpause;
 
 	clouddeg = 0;
 
@@ -4711,7 +4663,6 @@ void game_saveloadnew()
 
 	lowerlock = 0;
 
-	ticks = SDL_GetTicks();
 	ticks1 = ticks;
 	tickpause = ticks + 150;
 
@@ -4968,18 +4919,7 @@ void game_saveloadnew()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		clouddeg += 0.01 * fpsr;
 		while(clouddeg >= 360) clouddeg -= 360;
@@ -4987,7 +4927,7 @@ void game_saveloadnew()
 		itemyloc += 0.6 * fpsr;
 		while(itemyloc >= 16) itemyloc -= 16;
 
-		SDL_Delay(10);
+		SDL_Delay(5);
 	} while(1);
 
 	SDL_SetAlpha(cloudimg, SDL_SRCALPHA, 64);
@@ -4995,10 +4935,14 @@ void game_saveloadnew()
 
 void game_showlogos()
 {
+	//printf("SHOWLOGOS: %i\n", config.showlogos);
+	if (config.showlogos == 0) {
+		return;
+	}
+
 	float y;
 	int ticks1;
 
-	ticks = SDL_GetTicks();
 	ticks1 = ticks;
 
 	y = 0.0;
@@ -5028,18 +4972,7 @@ void game_showlogos()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		SDL_Delay(10);
 		if(ticks > ticks1 + 4000) break;
@@ -5063,18 +4996,7 @@ void game_swash()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24.0;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		clouddeg += 0.01 * fpsr;
 		while(clouddeg >= 360) clouddeg = clouddeg - 360;
@@ -5102,18 +5024,7 @@ void game_swash()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24.0;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		clouddeg += 0.01 * fpsr;
 		while(clouddeg >= 360) clouddeg = clouddeg - 360;
@@ -5140,18 +5051,7 @@ void game_theend()
 		SDL_Flip(video);
 		SDL_PumpEvents();
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24.0;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 	}
 
 	game_title(0);
@@ -5160,7 +5060,7 @@ void game_theend()
 void game_title(int mode)
 {
 	float xofs = 0;
-	int ticks, ticks1, keypause;
+	int ticks1, keypause;
 	int cursel, ldstop;
 	int x, y;
 
@@ -5171,8 +5071,6 @@ void game_title(int mode)
 
 	SDL_FillRect(videobuffer2, &rcSrc, 0);
 	SDL_FillRect(videobuffer3, &rcSrc, 0);
-
-	ticks = SDL_GetTicks();
 
 	SDL_BlitSurface(videobuffer, NULL, videobuffer3, NULL);
 	SDL_BlitSurface(videobuffer, NULL, videobuffer2, NULL);
@@ -5228,7 +5126,7 @@ void game_title(int mode)
 		sys_print(videobuffer, "quit game", x, y + 32, 4);
 
 		if(mode == 1) sys_print(videobuffer, "return", x, y + 48, 4);
-		else sys_print(videobuffer, "(c) 2005 by Daniel 'Syn9' Kennedy", 28, 224, 4); 
+		else sys_print(videobuffer, "(c) 2005 by Daniel 'Syn9' Kennedy", 28, 224, 4);
 
 		rc.x = (float)(x - 16 - 4 * cos(3.14159 * 2 * itemyloc / 16));
 		rc.y = (float)(y - 4 + 16 * cursel);
@@ -5246,18 +5144,7 @@ void game_title(int mode)
 		SDL_BLITVIDEO(videobuffer, NULL, video, NULL);
 		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, 255);
 
-		tickspassed = ticks;
-		ticks = SDL_GetTicks();
-
-		tickspassed = ticks - tickspassed;
-		fpsr = (float)tickspassed / 24.0;
-
-		fp++;
-		if(ticks > nextticks) {
-			nextticks = ticks + 1000;
-			fps = fp;
-			fp = 0;
-		}
+		sys_tickcalc();
 
 		float add = 0.5 * fpsr;
 		if(add > 1) add = 1;
@@ -5304,7 +5191,7 @@ void game_title(int mode)
 		}
 
 		SDL_Flip(video);
-		SDL_Delay(10);
+		SDL_Delay(5);
 	} while(1);
 
 	itemticks = ticks + 210;
@@ -7588,6 +7475,7 @@ void game_updspellsunder()
 
 void sys_initpaths()
 {
+/* NO, please..
 #ifdef __unix__
 	char line[256];
 	char *home = getenv("HOME");
@@ -7602,6 +7490,7 @@ void sys_initpaths()
 	strcpy(player_sav, line);
 	strcat(player_sav, "/player%i.sav");
 #endif
+*/
 }
 
 void sys_initialize()
@@ -7613,6 +7502,7 @@ void sys_initialize()
 	// init char *floatstri[MAXFLOAT]
 	for(int i = 0; i < MAXFLOAT; i++)
 		floatstri[i] = malloc(64); // 64 bytes each string (should be enough)
+
 
 	// set default values
 	config.scr_width = 320;
@@ -7698,9 +7588,6 @@ void sys_initialize()
 	sys_LoadAnims();
 	sys_LoadFont();
 	sys_LoadItemImgs();
-
-	fpsr = 1;
-	nextticks = ticks + 1000;
 
 	for(int i = 0; i <= 15; i++) {
 		playerattackofs[0][i][0] = 0; // -1// -(i + 1)
@@ -8126,19 +8013,7 @@ void sys_update()
 	SDL_Flip(video);
 	SDL_PumpEvents();
 
-	tickspassed = ticks;
-	ticks = SDL_GetTicks();
-
-	tickspassed = ticks - tickspassed;
-	fpsr = (float)tickspassed / 24.0;
-
-	fp++;
-	if(ticks > nextticks) {
-		nextticks = ticks + 1000;
-		fps = fp;
-		fp = 0;
-		secsingame = secsingame + 1;
-	}
+	sys_tickcalc();
 
 	SDL_LockSurface(clipbg);
 

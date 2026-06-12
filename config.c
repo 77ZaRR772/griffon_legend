@@ -14,7 +14,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  */
- 
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,9 +24,9 @@
 #include <SDL/SDL.h>
 
 #include "config.h"
- 
- CONFIG config = {
-	320, 240, 16, 0, 0, 0, 1, 127, 1, 127
+
+CONFIG config = {
+	0, 0, 320, 240, 16, 0, 0, 0, 1, 127, 1, 127
 };
 
 char config_ini[64] = "config.ini";
@@ -56,7 +56,15 @@ void config_load(CONFIG *config)
 		while(fgets(line, sizeof(line), fp) != NULL) {
 			sscanf(line, "%s", arg); // eliminate eol and eof by this
 
-			if(strcmp(arg, "SCR_WIDTH:") == 0) {
+			if(strcmp(arg, "showdbginfo:YES") == 0) {
+				config->showdbginfo = 1;
+			} else if(strcmp(arg, "showdbginfo:NO") == 0) {
+				config->showdbginfo = 0;
+			} else if(strcmp(arg, "SHOWLOGOS:YES") == 0) {
+				config->showlogos = 1;
+			} else if(strcmp(arg, "SHOWLOGOS:NO") == 0) {
+				config->showlogos = 0;
+			} else if(strcmp(arg, "SCR_WIDTH:") == 0) {
 				fgets(line, sizeof(line), fp);
 				sscanf(line, "%i", &config->scr_width);
 			} else if(strcmp(arg, "SCR_HEIGHT:") == 0) {
@@ -103,6 +111,8 @@ void config_save(CONFIG *config)
 	FILE *fp = fopen(config_ini, "w");
 
 	if(fp) {
+		PRINT("%s", config->showdbginfo ? "showdbginfo:YES" : "showdbginfo:NO");
+		PRINT("%s", config->showlogos ? "SHOWLOGOS:YES" : "SHOWLOGOS:NO");
 		PRINT("%s", "SCR_WIDTH:");
 		PRINT("%i", config->scr_width);
 		PRINT("%s", "SCR_HEIGHT:");

@@ -19,7 +19,8 @@
 #define _GRIFFON_H_
 
 #define MAXNPC		32
-#define MAXFLOAT	32
+#undef MAXFLOAT
+#define MAXFLOAT    32
 #define MAXSPELL	32
 
 // spells
@@ -250,6 +251,7 @@ void sys_print(SDL_Surface *buffer, char *stri, int xloc, int yloc, int col);
 void sys_progress(int w, int wm);
 void sys_LoadObjectDB();
 void sys_setupAudio();
+void sys_tickcalc();
 void sys_update();
 
 #endif // _GRIFFON_H_

@@ -4499,7 +4499,7 @@ void game_saveloadnew()
 
 				switch(event.key.keysym.sym) {
 				case SDLK_ESCAPE:
-				case SDLK_LALT:
+					forcepause = 0;
 					if(lowerlock == 0) return;
 					lowerlock = 0;
 					currow = 0;

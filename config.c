@@ -15,119 +15,121 @@
  *
  */
 
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <math.h>
-#include <sys/stat.h>
-
-#include <SDL/SDL.h>
-
+#include <ctype.h>
+#include <stddef.h>
+#include <SDL.h>
 #include "config.h"
 
-CONFIG config = {
-	0, 0, 320, 240, 16, 0, 0, 0, 1, 127, 1, 127
-};
-
+CONFIG config = {0, 0, 320, 240, 16, 0, 0, 0, 1, 127, 1, 127};
 char config_ini[64] = "config.ini";
 
-#define PRINT(A,B) 			\
-do {					\
-	char line[256];			\
-	sprintf(line, A "\n", B);	\
-	fputs(line, fp);		\
-} while(0)
+#define CFG_BOOL 0
+#define CFG_INT  1
+#define CFG_FLAG 2	//sdl_flag
 
-#define INPUT(A, B)			\
-do {					\
-	char line[256];			\
-	fgets(line, sizeof(line), fp);	\
-	sscanf(line, A, B);		\
-} while(0)
+typedef struct {
+	const char *name;
+	int type;
+	int offset;
+	int flag_val;
+} ConfigEntry;
 
-void config_load(CONFIG *config)
-{
-	char line[128];
-	char arg[128];
-	FILE *fp;
+static const ConfigEntry entries[] = {
+	{"showdbginfo",  CFG_BOOL, offsetof(CONFIG, showdbginfo), 0},
+	{"showlogos",    CFG_BOOL, offsetof(CONFIG, showlogos),   0},
+	{"scr_width",    CFG_INT,  offsetof(CONFIG, scr_width),   0},
+	{"scr_height",   CFG_INT,  offsetof(CONFIG, scr_height),  0},
+	{"scr_bits",     CFG_INT,  offsetof(CONFIG, scr_bpp),     0},
+	{"hwaccel",      CFG_FLAG, offsetof(CONFIG, hwaccel),     SDL_HWACCEL},
+	{"hwsurface",    CFG_FLAG, offsetof(CONFIG, hwsurface),   SDL_HWSURFACE},
+	{"fullscreen",   CFG_FLAG, offsetof(CONFIG, fullscreen),  SDL_FULLSCREEN},
+	{"music",        CFG_BOOL, offsetof(CONFIG, music),       0},
+	{"sndeffects",   CFG_BOOL, offsetof(CONFIG, effects),     0},
+	{"opmusicvol",   CFG_INT,  offsetof(CONFIG, musicvol),    0},
+	{"opeffectsvol", CFG_INT,  offsetof(CONFIG, effectsvol),  0},
+};
+#define NUM_ENTRIES (sizeof(entries) / sizeof(entries[0]))
 
-	fp = fopen(config_ini, "r");
-	if(fp) {
-		while(fgets(line, sizeof(line), fp) != NULL) {
-			sscanf(line, "%s", arg); // eliminate eol and eof by this
-
-			if(strcmp(arg, "showdbginfo:YES") == 0) {
-				config->showdbginfo = 1;
-			} else if(strcmp(arg, "showdbginfo:NO") == 0) {
-				config->showdbginfo = 0;
-			} else if(strcmp(arg, "SHOWLOGOS:YES") == 0) {
-				config->showlogos = 1;
-			} else if(strcmp(arg, "SHOWLOGOS:NO") == 0) {
-				config->showlogos = 0;
-			} else if(strcmp(arg, "SCR_WIDTH:") == 0) {
-				fgets(line, sizeof(line), fp);
-				sscanf(line, "%i", &config->scr_width);
-			} else if(strcmp(arg, "SCR_HEIGHT:") == 0) {
-				fgets(line, sizeof(line), fp);
-				sscanf(line, "%i", &config->scr_height);
-			} else if(strcmp(arg, "SCR_BITS:") == 0) {
-				fgets(line, sizeof(line), fp);
-				sscanf(line, "%i", &config->scr_bpp);
-			} else if(strcmp(arg, "HWACCEL:YES") == 0) {
-				config->hwaccel = SDL_HWACCEL;
-			} else if(strcmp(arg, "HWACCEL:NO") == 0) {
-				config->hwaccel = 0;
-			} else if(strcmp(arg, "HWSURFACE:YES") == 0) {
-				config->hwsurface = SDL_HWSURFACE;
-			} else if(strcmp(arg, "HWSURFACE:NO") == 0) {
-				config->hwsurface = 0;
-			} else if(strcmp(arg, "FULLSCREEN:YES") == 0) {
-				config->fullscreen = SDL_FULLSCREEN;
-			} else if(strcmp(arg, "FULLSCREEN:NO") == 0) {
-				config->fullscreen = 0;
-			} else if(strcmp(arg, "MUSIC:YES") == 0) {
-				config->music = 1;
-			} else if(strcmp(arg, "MUSIC:NO") == 0) {
-				config->music = 0;
-			} else if(strcmp(arg, "SNDEFFECTS:YES") == 0) {
-				config->effects = 1;
-			} else if(strcmp(arg, "SNDEFFECTS:NO") == 0) {
-				config->effects = 0;
-			} else if(strcmp(arg, "opmusicvol:") == 0) {
-				fgets(line, sizeof(line), fp);
-				sscanf(line, "%i", &config->musicvol);
-			} else if(strcmp(arg, "opeffectsvol:") == 0) {
-				fgets(line, sizeof(line), fp);
-				sscanf(line, "%i", &config->effectsvol);
-			}
-		}
-
-		fclose(fp);
+static int str_casecmp(const char *a, const char *b) {
+	while (*a && *b) {
+		if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 1;
+		a++; b++;
 	}
+	return *a != *b;
 }
 
-void config_save(CONFIG *config)
-{
-	FILE *fp = fopen(config_ini, "w");
+static int parse_bool(const char *s) {
+	return (strcmp(s, "1") == 0 ||
+	str_casecmp(s, "yes") == 0 ||
+	str_casecmp(s, "true") == 0 ||
+	str_casecmp(s, "on") == 0);
+}
 
-	if(fp) {
-		PRINT("%s", config->showdbginfo ? "showdbginfo:YES" : "showdbginfo:NO");
-		PRINT("%s", config->showlogos ? "SHOWLOGOS:YES" : "SHOWLOGOS:NO");
-		PRINT("%s", "SCR_WIDTH:");
-		PRINT("%i", config->scr_width);
-		PRINT("%s", "SCR_HEIGHT:");
-		PRINT("%i", config->scr_height);
-		PRINT("%s", "SCR_BITS:");
-		PRINT("%i", config->scr_bpp);
-		PRINT("%s", config->hwaccel ? "HWACCEL:YES" : "HWACCEL:NO");
-		PRINT("%s", config->hwsurface ? "HWSURFACE:YES" : "HWSURFACE:NO");
-		PRINT("%s", config->fullscreen ? "FULLSCREEN:YES" : "FULLSCREEN:NO");
-		PRINT("%s", config->music ? "MUSIC:YES" : "MUSIC:NO");
-		PRINT("%s", config->effects ? "SNDEFFECTS:YES" : "SNDEFFECTS:NO");
-		PRINT("%s", "opmusicvol:");
-		PRINT("%i", config->musicvol);
-		PRINT("%s", "opeffectsvol:");
-		PRINT("%i", config->effectsvol);
-		fclose(fp);
+static void trim_right(char *s) {
+	int len = strlen(s);
+	while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r' ||
+		s[len-1] == ' '  || s[len-1] == '\t'))
+		s[--len] = '\0';
+}
+
+void config_load(CONFIG *cfg) {
+	FILE *fp = fopen(config_ini, "r");
+	if (!fp) return;
+
+	char line[256];
+	while (fgets(line, sizeof(line), fp)) {
+		char *sep = line;
+		while (*sep && *sep != ':' && *sep != ' ' && *sep != '\t' &&
+			*sep != '\n' && *sep != '\r') sep++;
+
+		if (*sep == '\0' || *sep == '\n' || *sep == '\r') continue;
+
+		*sep = '\0';
+		char *val = sep + 1;
+
+		while (*val == ':' || *val == ' ' || *val == '\t') val++;
+		trim_right(val);
+
+		char valbuf[128];
+		if (*val == '\0' && fgets(valbuf, sizeof(valbuf), fp)) {
+			char *v = valbuf;
+			while (*v == ' ' || *v == '\t' || *v == ':') v++;
+			trim_right(v);
+			val = v;
+		}
+
+		for (char *p = line; *p; p++) *p = tolower((unsigned char)*p);
+
+		for (size_t i = 0; i < NUM_ENTRIES; i++) {
+			if (strcmp(line, entries[i].name) == 0) {
+				int *ptr = (int *)((char *)cfg + entries[i].offset);
+				switch (entries[i].type) {
+					case CFG_INT:  *ptr = atoi(val); break;
+					case CFG_BOOL: *ptr = parse_bool(val); break;
+					case CFG_FLAG: *ptr = parse_bool(val) ? entries[i].flag_val : 0; break;
+				}
+				break;
+			}
+		}
 	}
+	fclose(fp);
+}
+
+void config_save(CONFIG *cfg) {
+	FILE *fp = fopen(config_ini, "w");
+	if (!fp) return;
+
+	for (size_t i = 0; i < NUM_ENTRIES; i++) {
+		int *ptr = (int *)((char *)cfg + entries[i].offset);
+		if (entries[i].type == CFG_INT) {
+			fprintf(fp, "%s:%d\n", entries[i].name, *ptr);
+		} else {
+			int v = (entries[i].type == CFG_BOOL) ? *ptr : (*ptr != 0);
+			fprintf(fp, "%s:%s\n", entries[i].name, v ? "YES" : "NO");
+		}
+	}
+	fclose(fp);
 }

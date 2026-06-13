@@ -1447,7 +1447,7 @@ void game_configmenu()
 			if(event.type == SDL_KEYDOWN) {
 				keypause = ticks + tickwait;
 
-				if(keys[SDLK_ESCAPE] || keys[SDLK_LALT]) break;
+				if(keys[SDLK_ESCAPE]) break;
 
 				if(keys[SDLK_LEFT]) {
 					if(cursel == 11) {
@@ -2990,7 +2990,7 @@ void game_endofgame()
 		if(event.type == SDL_KEYDOWN) spd = 1;
 		if(event.type == SDL_KEYUP) spd = 0.2;
 
-		if(keys[SDLK_ESCAPE] || keys[SDLK_LALT]) break;
+		if(keys[SDLK_ESCAPE]) break;
 	} while(1);
 
 
@@ -4209,7 +4209,7 @@ void game_newgame()
 		keys = SDL_GetKeyState(NULL);
 
 		if(event.type == SDL_KEYDOWN) cnt = 6;
-		if(keys[SDLK_ESCAPE] || keys[SDLK_LALT]) goto __exit_do;
+		if(keys[SDLK_ESCAPE]) goto __exit_do;
 
 		SDL_Delay(5);
 	} while(1);
@@ -4900,7 +4900,7 @@ void game_title(int mode)
 			if(event.type == SDL_KEYDOWN) {
 				keypause = ticks + 150;
 
-				if((keys[SDLK_ESCAPE] || keys[SDLK_LALT]) && mode == 1) break;
+				if((keys[SDLK_ESCAPE]) && mode == 1) break;
 				else if(keys[SDLK_UP]) {
 					cursel--;
 					if(cursel < 0) cursel = (mode == 1 ? 3 : 2);

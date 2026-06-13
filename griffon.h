@@ -88,6 +88,7 @@ typedef struct {
 
 	float	itemselshade;
 	int	ysort;
+
 } PLAYERTYPE;
 
 typedef struct {
@@ -157,7 +158,10 @@ typedef struct {
 
 	// dragon2 specific
 	float	floating;
-	int lastmisstick;  // cooldown for "miss", fixing spam of text and sound
+
+	//fixes for miss! text and attacking sound spam
+	int lastmisstick;
+
 } NPCTYPE;
 
 typedef struct {

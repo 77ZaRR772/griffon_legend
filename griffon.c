@@ -961,10 +961,15 @@ void game_checkhit()
 
 					if(hit == 1) {
 						if(menabled == 1 && config.effects == 1) {
-							int snd = Mix_PlayChannel(-1, sfx[sndswordhit], 0);
-							Mix_Volume(snd, config.effectsvol);
+							static int last_hit_sound_tick = 0;
+							if(ticks - last_hit_sound_tick > 150) {
+								int snd = Mix_PlayChannel(-1, sfx[sndswordhit], 0);
+								if(snd >= 0) {
+									Mix_Volume(snd, config.effectsvol);
+								}
+								last_hit_sound_tick = ticks;
+							}
 						}
-
 						game_damagenpc(i, damage, 0);
 					}
 			}
@@ -1612,28 +1617,56 @@ void game_configmenu()
 	SDL_SetAlpha(cloudimg, SDL_SRCALPHA, 64);
 }
 
+static int are_all_enemies_dead() {
+	for(int i = 1; i <= lastnpc; i++) {
+		if(npcinfo[i].hp > 0) return 0;
+	}
+	return 1;
+}
+
+static void try_drop_item(int npcnum, int obj_id, int mult) {
+	int ff = (int)(RND() * player.level * mult);
+	if(ff == 0) {
+		int lx = (int)(npcinfo[npcnum].x + 12) / 16;
+		int ly = (int)(npcinfo[npcnum].y + 20) / 16;
+		if(objmap[lx][ly] == -1) objmap[lx][ly] = obj_id;
+	}
+}
+
+static void spawn_chest(int cx, int cy, int obj_id, int flag_idx) {
+	if(!are_all_enemies_dead()) return;
+
+	objmap[cx][cy] = obj_id;
+
+	rcDest.x = cx * 8;
+	rcDest.y = cy * 8;
+	rcDest.w = 8;
+	rcDest.h = 8;
+
+	int lx = (int)(player.px + 12) / 16;
+	int ly = (int)(player.py + 20) / 16;
+
+	if(lx == cx && ly == cy) player.py = player.py + 16;
+
+	SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
+	if (flag_idx >= 0) scriptflag[flag_idx][0] = 1;
+}
+
 void game_damagenpc(int npcnum, int damage, int spell)
 {
-	float npx, npy;
-	int lx, ly, cx, cy, alive;
 	char line[256];
-	int ratio;
-	int fcol, heal, ff;
+	int fcol;
 
 	if(damage == 0) {
-    int source_flag = spell ? 0x10000 : 0;
-    if (npcinfo[npcnum].lastmisstick > (ticks & 0xFFFF) &&
-        (npcinfo[npcnum].lastmisstick & 0x10000) == source_flag) {
-        return;
-    }
-    npcinfo[npcnum].lastmisstick = (ticks & 0xFFFF) | source_flag;
+		//prevent spam on a lot enemies
+		if (ticks - npcinfo[npcnum].lastmisstick < 3000) return;
+		npcinfo[npcnum].lastmisstick = ticks;
 
 		strcpy(line, "miss!");
 		fcol = 2;
 	} else {
-		ratio = 0;
-		heal = 0;
-		if(damage < 0) heal = 1;
+		int ratio = 0;
+		int heal = (damage < 0) ? 1 : 0;
 		damage = abs(damage);
 
 		if(heal == 0) {
@@ -1662,390 +1695,85 @@ void game_damagenpc(int npcnum, int damage, int spell)
 
 	game_addFloatText(line, npcinfo[npcnum].x + 12 - 4 * strlen(line), npcinfo[npcnum].y + 16, fcol);
 
-	if(npcinfo[npcnum].spriteset == 12) game_castspell(9, npcinfo[npcnum].x, npcinfo[npcnum].y, player.px, player.py, npcnum);
+	if(npcinfo[npcnum].spriteset == 12) {
+		game_castspell(9, npcinfo[npcnum].x, npcinfo[npcnum].y, player.px, player.py, npcnum);
+	}
 
 	// if enemy is killed
-	if(npcinfo[npcnum].hp == 0) {
-		player.exp = player.exp + npcinfo[npcnum].maxhp;
+	if(npcinfo[npcnum].hp != 0) return;
 
-		if(npcinfo[npcnum].spriteset == 1 || npcinfo[npcnum].spriteset == 7 || npcinfo[npcnum].spriteset == 6) {
-			ff = (int)(RND() * player.level * 3);
-			if(ff == 0) {
-				npx = npcinfo[npcnum].x + 12;
-				npy = npcinfo[npcnum].y + 20;
+	player.exp += npcinfo[npcnum].maxhp;
 
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
+	// Random drops based on spriteset
+	if(npcinfo[npcnum].spriteset == 1 || npcinfo[npcnum].spriteset == 7 || npcinfo[npcnum].spriteset == 6) {
+		try_drop_item(npcnum, 4, 3);
+	}
+	if(npcinfo[npcnum].spriteset == 2 || npcinfo[npcnum].spriteset == 9 || npcinfo[npcnum].spriteset == 4 || npcinfo[npcnum].spriteset == 5) {
+		try_drop_item(npcnum, 12, 1);
+	}
+	if(npcinfo[npcnum].spriteset == 9 || npcinfo[npcnum].spriteset == 10 || npcinfo[npcnum].spriteset == 5) {
+		try_drop_item(npcnum, 13, 2);
+	}
 
-				if(objmap[lx][ly] == -1) objmap[lx][ly] = 4;
-			}
+	int script = npcinfo[npcnum].script;
+
+	if(script == 2) {
+		spawn_chest(9, 7, 5, 2);
+	} else if(script == 3) {
+		spawn_chest(9, 7, 6, 3);
+	} else if(script == 4 && scriptflag[4][0] == 0) {
+		if(are_all_enemies_dead()) {
+			triggerloc[9][7] = 5004;
+
+			int curtile = 40;
+			int curtilel = 0;
+			int curtilex = curtile % 20;
+			int curtiley = (curtile - curtilex) / 20;
+
+			tileinfo[0][9][7][0] = curtile + 1;
+			tileinfo[0][9][7][1] = 0;
+
+			rcSrc.x = curtilex * 16;
+			rcSrc.y = curtiley * 16;
+			rcSrc.w = 16;
+			rcSrc.h = 16;
+
+			rcDest.x = 9 * 16;
+			rcDest.y = 7 * 16;
+			rcDest.w = 16;
+			rcDest.h = 16;
+
+			SDL_BlitSurface(tiles[curtilel], &rcSrc, mapbg, &rcDest);
+			scriptflag[4][0] = 1; // in original flag didn't apply
 		}
+	} else if(script == 5) {
+		spawn_chest(9, 6, 9, 5);
+	} else if(script == 8 && scriptflag[6][0] == 0) { // in original its indeed scriptflag[6][0], not 8 as should, maybe bug
+		spawn_chest(13, 7, 5, 8);
+	} else if(script >= 20 && script <= 23 && scriptflag[script][0] < 2) {
+		spawn_chest(9, 7, 11, script);
+	} else if(script == 9 && curmap == 41 && scriptflag[9][1] == 0) {
+		if(are_all_enemies_dead()) {
+			objmap[9][7] = 13;
 
-		if(npcinfo[npcnum].spriteset == 2 || npcinfo[npcnum].spriteset == 9 || npcinfo[npcnum].spriteset == 4 || npcinfo[npcnum].spriteset == 5) {
-			ff = (int)(RND() * player.level);
-			if(ff == 0) {
-				npx = npcinfo[npcnum].x + 12;
-				npy = npcinfo[npcnum].y + 20;
+			int lx = (int)(player.px + 12) / 16;
+			int ly = (int)(player.py + 20) / 16;
 
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(objmap[lx][ly] == -1) objmap[lx][ly] = 12;
-			}
+			if(lx == 9 && ly == 7) player.py = player.py + 16;
+			scriptflag[9][1] = 1; // in original flag didn't apply
 		}
-
-		if(npcinfo[npcnum].spriteset == 9 || npcinfo[npcnum].spriteset == 10 || npcinfo[npcnum].spriteset == 5) {
-			ff = (int)(RND() * player.level * 2);
-			if(ff == 0) {
-				npx = npcinfo[npcnum].x + 12;
-				npy = npcinfo[npcnum].y + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(objmap[lx][ly] == -1) objmap[lx][ly] = 13;
-			}
+	} else if(script == 12) {
+		spawn_chest(8, 7, 16, 12);
+	} else if(script == 13 && scriptflag[13][0] == 0) {
+		spawn_chest(11, 10, 5, 13);
+	} else if(script == 15 && scriptflag[15][0] == 0) {
+		if(are_all_enemies_dead()) {
+			spawn_chest(6, 8, 18, 15);
+			spawn_chest(9, 8, 19, 16);
+			spawn_chest(12, 8, 20, 17);
 		}
-
-		// academy master key chest script
-		if(npcinfo[npcnum].script == 2) {
-			cx = 9;
-			cy = 7;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 5;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-				scriptflag[2][0] = 1;
-			}
-		}
-
-		// academy crystal chest script
-		if(npcinfo[npcnum].script == 3) {
-			cx = 9;
-			cy = 7;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 6;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				scriptflag[3][0] = 1;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-			}
-		}
-
-		// tower shield chest script
-		if(npcinfo[npcnum].script == 4 && scriptflag[4][0] == 0) {
-				triggerloc[9][7] = 5004;
-
-				int curtile = 40;
-				int curtilel = 0;
-				int curtilex = curtile % 20;
-				int curtiley = (curtile - curtilex) / 20;
-
-				int l = 0; // ?? not defined in original code
-				tileinfo[l][9][7][0] = curtile + 1;
-				tileinfo[l][9][7][1] = 0;
-
-				rcSrc.x = curtilex * 16;
-				rcSrc.y = curtiley * 16;
-				rcSrc.w = 16;
-				rcSrc.h = 16;
-
-				rcDest.x = 9 * 16;
-				rcDest.y = 7 * 16;
-				rcDest.w = 16;
-				rcDest.h = 16;
-
-				SDL_BlitSurface(tiles[curtilel], &rcSrc, mapbg, &rcDest);
-		}
-
-		// firehydra sword chest
-		if(npcinfo[npcnum].script == 5) {
-			cx = 9;
-			cy = 6;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 9;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				scriptflag[5][0] = 1;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-			}
-
-		}
-
-		// gardens master key script
-		if(npcinfo[npcnum].script == 8 && scriptflag[6][0] == 0) {
-			cx = 13;
-			cy = 7;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 5;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-				scriptflag[8][0] = 1;
-			}
-		}
-
-		// regular key chest 1
-		for(int s = 20; s <= 23; s++) {
-			if(npcinfo[npcnum].script == s && scriptflag[s][0] < 2) {
-				cx = 9;
-				cy = 7;
-
-				alive = 0;
-				for(int i = 1; i <= lastnpc; i++) {
-					if(npcinfo[i].hp > 0) alive = 1;
-				}
-
-				if(alive == 0) {
-					objmap[cx][cy] = 11;
-
-					rcDest.x = cx * 8;
-					rcDest.y = cy * 8;
-					rcDest.w = 8;
-					rcDest.h = 8;
-
-					npx = player.px + 12;
-					npy = player.py + 20;
-
-					lx = (int)npx / 16;
-					ly = (int)npy / 16;
-
-					if(lx == cx && ly == cy) player.py = player.py + 16;
-					scriptflag[s][0] = 1;
-					SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-				}
-			}
-		}
-
-		// pickup lightning bomb
-		if(npcinfo[npcnum].script == 9 && (curmap == 41 && scriptflag[9][1] == 0)) {
-			cx = 9;
-			cy = 7;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 13;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-			}
-		}
-
-		// citadel armour chest
-		if(npcinfo[npcnum].script == 12) {
-			cx = 8;
-			cy = 7;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 16;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				scriptflag[12][0] = 1;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-			}
-		}
-
-		// citadel master key script
-		if(npcinfo[npcnum].script == 13 && scriptflag[13][0] == 0) {
-			cx = 11;
-			cy = 10;
-
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				objmap[cx][cy] = 5;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-				scriptflag[13][0] = 1;
-			}
-		}
-
-		// max ups
-		if(npcinfo[npcnum].script == 15 && scriptflag[15][0] == 0) {
-			alive = 0;
-			for(int i = 1; i <= lastnpc; i++) {
-				if(npcinfo[i].hp > 0) alive = 1;
-			}
-
-			if(alive == 0) {
-				cx = 6;
-				cy = 8;
-
-				objmap[cx][cy] = 18;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-				scriptflag[15][0] = 1;
-
-				cx = 9;
-				cy = 8;
-
-				objmap[cx][cy] = 19;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-
-				scriptflag[16][0] = 1;
-
-				cx = 12;
-				cy = 8;
-
-				objmap[cx][cy] = 20;
-
-				rcDest.x = cx * 8;
-				rcDest.y = cy * 8;
-				rcDest.w = 8;
-				rcDest.h = 8;
-
-				npx = player.px + 12;
-				npy = player.py + 20;
-
-				lx = (int)npx / 16;
-				ly = (int)npy / 16;
-
-				if(lx == cx && ly == cy) player.py = player.py + 16;
-				SDL_FillRect(clipbg2, &rcDest, SDL_MapRGB(clipbg->format, 255,255,255));
-				scriptflag[17][0] = 1;
-			}
-		}
-
-		if(npcinfo[npcnum].script == 14) game_endofgame();
+	} else if(script == 14) {
+		game_endofgame();
 	}
 }
 
@@ -2167,6 +1895,12 @@ void game_drawhud()
 	if (config.showdbginfo == 1) {
 		sprintf(line,  "fps: %i, map: %i, exp: %i/%i ", (int)fps, curmap, player.exp, player.nextlevel);
 		sys_print(videobuffer, line, 0, 0, 0);
+		//sprintf(line,  "sword: %i, shield: %i, armour: %i", (int)player.sword, player.shield, player.armour);
+		//sys_print(videobuffer, line, 0, 10, 0);
+		sprintf(line, "sworddmg: %i, spelldmg: %i", (int)player.sworddamage, player.spelldamage);
+		sys_print(videobuffer, line, 0, 10, 0);
+		//sprintf(line,  "foundspell: %i/%i", (int)player.foundspell);
+		//sys_print(videobuffer, line, 0, 20, 0);
 	}
 
 	long ccc;
@@ -4560,6 +4294,7 @@ void game_playgame()
 	if(pmenu == 1 && menabled == 1) {
 		Mix_HaltChannel(menuchannel);
 		pmenu = 0;
+		Mix_Resume(musicchannel);
 	}
 
 	do {
@@ -6766,22 +6501,24 @@ void game_updspells()
 
 
 
-					char line[256];
-					strcpy(line, "Found... nothing...");
+					char line[256] = "";
 
 					for(int f = 0; f < 5; f++) {
 						if(foundel[f] == 1 && player.foundspell[f] == 0) {
 							player.foundspell[f] = 1;
 							player.spellcharge[f] = 0;
+
 							if(f == 1) strcpy(line, "Found... Water Essence");
-							if(f == 2) strcpy(line, "Found... Metal Essence");
-							if(f == 3) strcpy(line, "Found... Earth Essence");
-							if(f == 4) strcpy(line, "Found... Fire Essence");
+							else if(f == 2) strcpy(line, "Found... Metal Essence");
+							else if(f == 3) strcpy(line, "Found... Earth Essence");
+							else if(f == 4) strcpy(line, "Found... Fire Essence");
 							break;
 						}
 					}
 
-					game_eventtext(line);
+					if (line[0] != '\0') {
+						game_eventtext(line);
+					}
 
 					int heal = player.maxhp / 2;
 					int maxh = player.maxhp - player.hp;

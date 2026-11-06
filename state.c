@@ -35,11 +35,11 @@ do {					\
 	fputs(line, fp);		\
 } while(0)
 
-#define INPUT(A, B)			\
-do {					\
-	char line[256];			\
-	fgets(line, sizeof(line), fp);	\
-	sscanf(line, A, B);		\
+#define INPUT(A, B)						\
+do {								\
+	char line[256];						\
+	if(!fgets(line, sizeof(line), fp) || sscanf(line, A, B) != 1)	\
+		input_error = 1;					\
 } while(0)
 
 // externs (to be removed later)
@@ -50,8 +50,10 @@ int state_load(int slotnum)
 {
 	FILE *fp;
 	char line[256];
+	int input_error = 0;
 
 	sprintf(line, player_sav, slotnum);
+	player.level = 0;
 
 	fp = fopen(line, "r");
 	if(fp) {
@@ -59,7 +61,7 @@ int state_load(int slotnum)
 
 		if(player.level > 0) {
 			INPUT("%i", &secstart);
-			INPUT("%s", line);
+			INPUT("%255s", line);
 
 			INPUT("%f", &player.px);
 			INPUT("%f", &player.py);
@@ -113,7 +115,7 @@ int state_load(int slotnum)
 
 			fclose(fp);
 
-			return 1; // success
+			return !input_error;
 		}
 
 		fclose(fp);
@@ -127,6 +129,7 @@ int state_load_player(int slotnum)
 {
 	FILE *fp;
 	char line[256];
+	int input_error = 0;
 
 	sprintf(line, player_sav, slotnum);
 
@@ -138,7 +141,7 @@ int state_load_player(int slotnum)
 
 		if(playera.level > 0) {
 			INPUT("%i", &asecstart);
-			INPUT("%s", line);
+			INPUT("%255s", line);
 
 			INPUT("%f", &playera.px);
 			INPUT("%f", &playera.py);
@@ -172,7 +175,8 @@ int state_load_player(int slotnum)
 
 			fclose(fp);
 
-			return 1; // success
+			if(input_error) playera.level = 0;
+			return !input_error;
 		}
 
 		fclose(fp);
@@ -185,10 +189,12 @@ int state_save(int slotnum)
 {
 	FILE *fp;
 	char line[256];
+	char tempfile[260];
 
 	sprintf(line, player_sav, slotnum);
+	sprintf(tempfile, "%s.tmp", line);
 
-	fp = fopen(line, "w");
+	fp = fopen(tempfile, "w");
 	if(fp) {
 		PRINT("%i", player.level);
 
@@ -247,10 +253,20 @@ int state_save(int slotnum)
 			PRINT("%f", player.spellstrength);
 		}
 
-		fclose(fp);
+		if(fclose(fp) != 0) {
+			remove(tempfile);
+			return 0;
+		}
+#ifdef _WIN32
+		remove(line);
+#endif
+		if(rename(tempfile, line) != 0) {
+			remove(tempfile);
+			return 0;
+		}
 
-		return 1; // success
+		return 1;
 	}
 
-	return 0; // fail
+	return 0;
 }

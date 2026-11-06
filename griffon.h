@@ -18,9 +18,10 @@
 #ifndef _GRIFFON_H_
 #define _GRIFFON_H_
 
+#include <SDL/SDL.h>
+
 #define MAXNPC		32
-#undef MAXFLOAT
-#define MAXFLOAT    32
+#define MAX_FLOATING_TEXTS    32
 #define MAXSPELL	32
 
 // spells
@@ -110,6 +111,7 @@ typedef struct {
 	int	y2;
 	int	attitude;
 	int	hp;
+	float	spelldamagecarry;
 
 	int	maxhp;
 	int	item1;
@@ -137,6 +139,7 @@ typedef struct {
 	float	attackspd;
 	int	attackdelay;
 	int	attacknext;
+	int	specialnext;
 	int	attackattempt;
 
 	int	spelldamage;
@@ -161,6 +164,7 @@ typedef struct {
 
 	//fixes for miss! text and attacking sound spam
 	int lastmisstick;
+	int aggro;
 
 } NPCTYPE;
 
@@ -191,6 +195,8 @@ typedef struct {
 	int	ballon[7];
 
 	int	npc;
+	int	targetnpc;
+	int	hitnext[MAXNPC];
 } SPELLTYPE;
 
 typedef struct {
@@ -203,6 +209,7 @@ typedef struct {
 } ANIMSET2TYPE;
 
 extern PLAYERTYPE player;
+extern SDL_Event event;
 extern int curmap;
 extern int scriptflag[100][10];
 extern int objmapf[1000][21][15];
@@ -211,51 +218,57 @@ extern int secsingame, secstart;
 
 void game_addFloatIcon(int ico, float xloc, float yloc);
 void game_addFloatText(char *stri, float xloc, float yloc, int col);
-void game_attack();
+void game_attack(void);
 void game_castspell(int spellnum, float homex, float homey, float enemyx, float enemyy, int damagewho);
-void game_checkhit();
-void game_checkinputs();
-void game_configmenu();
+void game_checkhit(void);
+void game_checkinputs(void);
+void game_configmenu(void);
 void game_damagenpc(int npcnum, int damage, int spell);
 void game_damageplayer(int damage);
 void game_drawanims(int Layer);
-void game_drawhud();
+void game_draweventtext(void);
+void game_drawhud(void);
 void game_drawnpcs(int mode);
 void game_drawover(int modx, int mody);
-void game_drawplayer();
-void game_drawview();
-void game_endofgame();
+void game_drawplayer(void);
+void game_drawview(void);
+void game_endofgame(void);
 void game_eventtext(char *stri);
-void game_handlewalking();
+void game_fillrect(SDL_Surface *surface, int x, int y, int w, int h, int color);
+void game_handlewalking(void);
 void game_loadmap(int mapnum);
-void game_main();
-void game_newgame();
-void game_playgame();
+int game_readmap(const char *name, int tempmap[320][200]);
+void game_setpause(int paused);
+void game_main(void);
+void game_newgame(void);
+void game_playgame(void);
 void game_processtrigger(int trignum);
-void game_saveloadnew();
-void game_showlogos();
-void game_swash();
-void game_theend();
+void game_saveloadnew(void);
+void game_showlogos(void);
+void game_swash(void);
+void game_theend(void);
 void game_title(int mode);
-void game_updanims();
-void game_updatey();
-void game_updmusic();
-void game_updnpcs();
-void game_updspells();
-void game_updspellsunder();
+void game_updanims(void);
+void game_updatey(void);
+void game_updmusic(void);
+void game_updnpcs(void);
+void game_updspells(void);
+void game_updspellsunder(void);
 
-void sys_initialize();
+void sdl_blitscale(SDL_Surface *src, SDL_Rect *srcrect, SDL_Surface *dst, SDL_Rect *dstrect);
+void sys_initialize(void);
+int sys_pollevent(void);
 void sys_line(SDL_Surface *buffer, int x1, int y1, int x2, int y2, int col);
-void sys_LoadAnims();
-void sys_LoadFont();
-void sys_LoadItemImgs();
-void sys_LoadTiles();
-void sys_LoadTriggers();
+void sys_LoadAnims(void);
+void sys_LoadFont(void);
+void sys_LoadItemImgs(void);
+void sys_LoadTiles(void);
+void sys_LoadTriggers(void);
 void sys_print(SDL_Surface *buffer, char *stri, int xloc, int yloc, int col);
 void sys_progress(int w, int wm);
-void sys_LoadObjectDB();
-void sys_setupAudio();
-void sys_tickcalc();
-void sys_update();
+void sys_LoadObjectDB(void);
+void sys_setupAudio(void);
+void sys_tickcalc(void);
+void sys_update(void);
 
 #endif // _GRIFFON_H_

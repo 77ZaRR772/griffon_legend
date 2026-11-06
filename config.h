@@ -25,17 +25,36 @@ typedef struct {
 	int scr_height;
 	int scr_bpp;
 	int fullscreen;
+	int stretch;
+	int fastfade;
 	int hwaccel;
 	int hwsurface;
 	int music;
 	int musicvol;
 	int effects;
 	int effectsvol;
+	int random_enemies;
+	int key_up;
+	int key_down;
+	int key_left;
+	int key_right;
+	int key_attack;
+	int key_item;
+	int key_menu;
+	int key_dbg;
+	int key_cheat_god;
+	int key_cheat_noclip;
+	int key_spell1;
+	int key_spell2;
+	int key_spell3;
+	int key_spell4;
+	int key_spell5;
 } CONFIG;
 
 extern CONFIG config;
 extern char config_ini[];
 
+void config_defaults(CONFIG *config);
 void config_load(CONFIG *config);
 void config_save(CONFIG *config);
 

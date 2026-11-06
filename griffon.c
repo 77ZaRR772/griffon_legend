@@ -24,11 +24,11 @@
 #include <SDL/SDL.h>
 #include <SDL/SDL_image.h>
 #include <SDL/SDL_mixer.h>
-#include <SDL/SDL_rotozoom.h>
 
 #include "griffon.h"
 #include "config.h"
 #include "state.h"
+#include "debug.h"
 
 // fix float warnings
 #undef abs
@@ -105,13 +105,15 @@ SDL_Surface *itemimg[21], *windowimg;
 SDL_Surface *spellimg;
 
 int itemselon, curitem, itemticks;
+char eventtext[128];
+int eventtextstart, eventtextend;
 float itemyloc;
 int selenemyon, curenemy, forcepause;
 int roomlock; // set to disable any room jumps while in the room
 int scriptflag[100][10], saveslot;	// script, flag
 
 // timer related - move to local later
-int ticks, tickspassed, nextticks;
+int ticks, tickspassed, nextticks, game_time;
 float fp, fps, fpsr;
 int secsingame, secstart;
 
@@ -163,9 +165,9 @@ SDL_Surface *animsa[100];
 float playerattackofs[4][16][3];
 		// [dir] [frame] [x,y ofs, completed(0/1)]
 
-float floattext[MAXFLOAT][4]; // [id] [framesleft, x, y, col]
-char *floatstri[MAXFLOAT];
-float  floaticon[MAXFLOAT][4]; // [id] [framesleft, x, y, ico]
+float floattext[MAX_FLOATING_TEXTS][4]; // [id] [framesleft, x, y, col]
+char *floatstri[MAX_FLOATING_TEXTS];
+float  floaticon[MAX_FLOATING_TEXTS][4]; // [id] [framesleft, x, y, ico]
 
 // special for animset2
 ANIMSET2TYPE animset2[7], animset9[7];
@@ -224,10 +226,10 @@ void sys_tickcalc() {
         tickspassed = ticks - old_ticks;
     }
 
-    // safe trick protection of divide to zero..
-    if (tickspassed == 0) tickspassed = 1;
+    if(tickspassed <= 0) tickspassed = 1;
+    if(tickspassed > 100) tickspassed = 100;
 
-    fpsr = (float)tickspassed / 24.0; // 24 frames for simulating 30 fps yet holding 60fps.
+    fpsr = (float)tickspassed / 24.0;
 
     fp++;
     if(ticks > nextticks) {
@@ -419,18 +421,52 @@ do {					\
 
 void sdl_blitscale(SDL_Surface *src, SDL_Rect *srcrect, SDL_Surface *dst, SDL_Rect *dstrect)
 {
+	static SDL_Surface *scaled;
 	(void)srcrect;
-    (void)dstrect;
-	if(src->w != dst->w) {
-		SDL_Surface *scale2x = NULL;
+	(void)dstrect;
 
-		scale2x = zoomSurface(src, 2, 2, 0);
-		SDL_BlitSurface(scale2x, NULL, dst, NULL);
-		SDL_FreeSurface(scale2x);
-	} else {
+	if(src->w == dst->w && src->h == dst->h) {
 		SDL_BlitSurface(src, NULL, dst, NULL);
+		return;
 	}
 
+	if(!scaled || scaled->w != dst->w || scaled->h != dst->h ||
+		scaled->format->BitsPerPixel != src->format->BitsPerPixel) {
+		if(scaled) SDL_FreeSurface(scaled);
+		scaled = SDL_CreateRGBSurface(SDL_SWSURFACE, dst->w, dst->h,
+			src->format->BitsPerPixel, src->format->Rmask, src->format->Gmask,
+			src->format->Bmask, src->format->Amask);
+	}
+	if(!scaled) return;
+
+	SDL_LockSurface(src);
+	SDL_LockSurface(scaled);
+	int bpp = src->format->BytesPerPixel;
+
+	for(int y = 0; y < dst->h; y++) {
+		Uint8 *source = (Uint8 *)src->pixels + (y * src->h / dst->h) * src->pitch;
+		Uint8 *target = (Uint8 *)scaled->pixels + y * scaled->pitch;
+
+		for(int x = 0; x < dst->w; x++)
+			memcpy(target + x * bpp, source + (x * src->w / dst->w) * bpp, bpp);
+	}
+
+	SDL_UnlockSurface(scaled);
+	SDL_UnlockSurface(src);
+	SDL_SetAlpha(scaled, src->flags & SDL_SRCALPHA, src->format->alpha);
+	SDL_BlitSurface(scaled, NULL, dst, NULL);
+}
+
+static SDL_Surface *game_setvideomode(int width, int height, int bpp, int flags)
+{
+	if(config.stretch && (flags & SDL_FULLSCREEN)) {
+		const SDL_VideoInfo *info = SDL_GetVideoInfo();
+		if(info && info->current_w > 0 && info->current_h > 0) {
+			width = info->current_w / 2;
+			height = info->current_h / 2;
+		}
+	}
+	return SDL_SetVideoMode(width, height, bpp, flags);
 }
 
 void game_fillrect(SDL_Surface *surface, int x, int y, int w, int h, int color)
@@ -452,9 +488,98 @@ static float RND()
 	return (float)rand() * (1.0 / ((float)RAND_MAX + 1.0));
 }
 
+static int windowfocused = 1;
+
+static SDL_Surface *sys_loadimage(const char *name)
+{
+	SDL_Surface *image = IMG_Load(name);
+	if(!image) {
+		fprintf(stderr, "Failed to load image %s: %s\n", name, IMG_GetError());
+		exit(1);
+	}
+	return image;
+}
+
+static Mix_Chunk *sys_loadchunk(const char *name)
+{
+	Mix_Chunk *chunk = Mix_LoadWAV(name);
+	if(!chunk) {
+		fprintf(stderr, "Failed to load audio %s: %s\n", name, Mix_GetError());
+		exit(1);
+	}
+	return chunk;
+}
+
+static void sys_joykey(SDLKey sym, int pressed)
+{
+	Uint8 *keystate = SDL_GetKeyState(NULL);
+
+	if(sym >= SDLK_LAST) return;
+	keystate[sym] = pressed;
+	event.type = pressed ? SDL_KEYDOWN : SDL_KEYUP;
+	event.key.type = event.type;
+	event.key.state = pressed ? SDL_PRESSED : SDL_RELEASED;
+	event.key.keysym.sym = sym;
+}
+
+int sys_pollevent(void)
+{
+	static SDL_Event eventqueue[64];
+	static int eventpos, eventcount;
+
+	if(eventpos == eventcount) {
+		eventpos = 0;
+		eventcount = 0;
+		SDL_PumpEvents();
+		while(eventcount < 64 && SDL_PollEvent(&eventqueue[eventcount])) eventcount++;
+		if(eventcount == 0) return 0;
+	}
+
+	event = eventqueue[eventpos++];
+	int result = 1;
+
+	if(event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+		SDLKey sym = event.key.keysym.sym;
+		if(sym < SDLK_LAST) SDL_GetKeyState(NULL)[sym] = event.type == SDL_KEYDOWN;
+	}
+
+	if(event.type == SDL_QUIT) exit(0);
+	if(event.type == SDL_ACTIVEEVENT && (event.active.state & SDL_APPINPUTFOCUS))
+		windowfocused = event.active.gain != 0;
+
+	if(event.type == SDL_JOYBUTTONDOWN || event.type == SDL_JOYBUTTONUP) {
+		int pressed = event.type == SDL_JOYBUTTONDOWN;
+		SDLKey sym = SDLK_UNKNOWN;
+
+		if(event.jbutton.button == 0) sym = config.key_attack;
+		if(event.jbutton.button == 1) sym = config.key_item;
+		if(event.jbutton.button == 2 || event.jbutton.button == 7) sym = SDLK_RETURN;
+		if(event.jbutton.button == 6 || event.jbutton.button == 9) sym = config.key_menu;
+		if(sym != SDLK_UNKNOWN) sys_joykey(sym, pressed);
+	}
+
+	if(event.type == SDL_JOYAXISMOTION && event.jaxis.axis < 2) {
+		SDLKey negative = event.jaxis.axis == 0 ? config.key_left : config.key_up;
+		SDLKey positive = event.jaxis.axis == 0 ? config.key_right : config.key_down;
+		int direction = event.jaxis.value < -8000 ? -1 : event.jaxis.value > 8000 ? 1 : 0;
+
+		sys_joykey(negative, direction == -1);
+		sys_joykey(positive, direction == 1);
+	}
+
+	if(event.type == SDL_JOYHATMOTION) {
+		sys_joykey(config.key_left, event.jhat.value & SDL_HAT_LEFT);
+		sys_joykey(config.key_right, event.jhat.value & SDL_HAT_RIGHT);
+		sys_joykey(config.key_up, event.jhat.value & SDL_HAT_UP);
+		sys_joykey(config.key_down, event.jhat.value & SDL_HAT_DOWN);
+	}
+
+	return result;
+}
+
 void game_addFloatIcon(int ico, float xloc, float yloc)
 {
-	for(int i = 0; i < MAXFLOAT; i++) {
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++) {
 		if(floaticon[i][0] == 0) {
 			floaticon[i][0] = 32;
 			floaticon[i][1] = xloc;
@@ -467,7 +592,7 @@ void game_addFloatIcon(int ico, float xloc, float yloc)
 
 void game_addFloatText(char *stri, float xloc, float yloc, int col)
 {
-	for(int i = 0; i < MAXFLOAT; i++) {
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++) {
 		if(floattext[i][0] == 0) {
 			floattext[i][0] = 32;
 			floattext[i][1] = xloc;
@@ -865,11 +990,13 @@ void game_castspell(int spellnum, float homex, float homey, float enemyx, float 
 
 			spellinfo[i].damagewho = dw;
 			spellinfo[i].npc = npc;
+			spellinfo[i].targetnpc = ai_target;
+			memset(spellinfo[i].hitnext, 0, sizeof(spellinfo[i].hitnext));
 
 			spellinfo[i].frame = 32;
 			if(damagewho == 0) {
-				spellinfo[i].strength = player.spellstrength / 100;
-				if(player.spellstrength == 100) spellinfo[i].strength = 1.5;
+				spellinfo[i].strength = controlled_npc > 0 ? 1 : player.spellstrength / 100;
+				if(controlled_npc == 0 && player.spellstrength == 100) spellinfo[i].strength = 1.5;
 			}
 
 			// set earthslide vars
@@ -888,6 +1015,12 @@ void game_castspell(int spellnum, float homex, float homey, float enemyx, float 
 				}
 			}
 
+			if(spellnum == 7 && ai_target > 0) {
+				float dx = npcinfo[ai_target].x - homex;
+				float dy = npcinfo[ai_target].y - homey;
+				if(dx * dx + dy * dy < 24 * 24)
+					game_damagenpc(ai_target, npcinfo[damagewho].spelldamage, 1);
+			}
 
 			// room fireball vars
 			if(spellnum == 6) {
@@ -936,7 +1069,7 @@ void game_checkhit()
 
 	if(attacking == 1) {
 		for(int i = 1; i <= lastnpc; i++) {
-			if(npcinfo[i].hp > 0 && npcinfo[i].pause < ticks && (int)(RND() * 2) == 0) {
+			if(npcinfo[i].hp > 0 && npcinfo[i].pause < game_time && (int)(RND() * 2) == 0) {
 				npx = npcinfo[i].x;
 				npy = npcinfo[i].y;
 
@@ -977,13 +1110,54 @@ void game_checkhit()
 	}
 }
 
+void game_setpause(int paused)
+{
+	forcepause = paused;
+}
+
+static void game_quickspell(int item)
+{
+	int spell = item - 1;
+	if(controlled_npc > 0 || itemselon || itemticks >= ticks) return;
+	if(item > 0 && (spell < 0 || !player.foundspell[item] || player.spellcharge[item] < 100)) return;
+
+	if(item == 0) {
+		if(player.spellcharge[0] < 100) return;
+		game_castspell(5, player.px, player.py, player.px, player.py, 0);
+		player.spellcharge[0] = 0;
+		itemticks = ticks + 175;
+		return;
+	}
+
+	for(int i = 0; i <= lastnpc; i++) {
+		if(npcinfo[i].hp > 0) {
+			game_castspell(spell, player.px, player.py, npcinfo[i].x, npcinfo[i].y, 0);
+			player.spellcharge[item] = 0;
+			player.spellstrength = 0;
+			itemticks = ticks + 175;
+			return;
+		}
+	}
+	if(nposts > 0) {
+		game_castspell(spell, player.px, player.py, postinfo[0][0], postinfo[0][1], 0);
+		player.spellcharge[item] = 0;
+		player.spellstrength = 0;
+		itemticks = ticks + 175;
+	}
+}
+
 void game_checkinputs()
 {
 	int ntickdelay;
 
 	ntickdelay = 175;
 
-	SDL_PollEvent(&event);
+	sys_pollevent();
+	if(event.type == SDL_KEYUP) {
+		int keycode = event.key.keysym.sym;
+		if(keycode == config.key_dbg) keycode = SDLK_F12;
+		debug_keyup(keycode);
+	}
 	keys = SDL_GetKeyState(NULL);
 
 	nposts = 0;
@@ -996,7 +1170,7 @@ void game_checkinputs()
 	for(int x = 0; x <= 19; x++) {
 		for(int y = 0; y <= 14; y++) {
 			int o = objmap[x][y];
-			if(objectinfo[o][4] == 3) {
+			if(o >= 0 && objectinfo[o][4] == 3) {
 				postinfo[nposts][0] = x * 16;
 				postinfo[nposts][1] = y * 16;
 				nposts = nposts + 1;
@@ -1007,9 +1181,38 @@ void game_checkinputs()
 	if(attacking == 1 || (forcepause == 1 && itemselon == 0)) return;
 
 	if(event.type == SDL_KEYDOWN) {
-		switch(event.key.keysym.sym) {
+		int keycode = event.key.keysym.sym;
+		if(keycode == config.key_menu) keycode = SDLK_ESCAPE;
+		if(keycode == config.key_attack) keycode = SDLK_LCTRL;
+		if(keycode == config.key_item) keycode = SDLK_LALT;
+		if(keycode == config.key_dbg) keycode = SDLK_F12;
+		if(keycode == config.key_cheat_god) keycode = SDLK_F11;
+		if(keycode == config.key_cheat_noclip) keycode = SDLK_F10;
+
+		if(debug_handlekey(keycode)) return;
+		if(keycode == config.key_spell1) game_quickspell(0);
+		if(keycode == config.key_spell2) game_quickspell(1);
+		if(keycode == config.key_spell3) game_quickspell(2);
+		if(keycode == config.key_spell4) game_quickspell(3);
+		if(keycode == config.key_spell5) game_quickspell(4);
+
+		if(selenemyon && monster_target && controlled_npc == 0 && itemticks < ticks) {
+			if(keycode == config.key_left || keycode == config.key_up) debug_npctarget(-1);
+			if(keycode == config.key_right || keycode == config.key_down) debug_npctarget(1);
+			itemticks = ticks + 250;
+		}
+
+		switch(keycode) {
 		case SDLK_ESCAPE:
-			if(itemticks < ticks) game_title(1);
+			if(selenemyon && monster_target && controlled_npc == 0) {
+				selenemyon = 0;
+				itemticks = ticks + 200;
+			} else if(itemticks < ticks) {
+				int waspaused = forcepause;
+				game_setpause(1);
+				game_title(1);
+				if(!waspaused) game_setpause(0);
+			}
 			break;
 		case SDLK_RETURN:
 			if(keys[SDLK_LALT] || keys[SDLK_RALT]) {
@@ -1021,17 +1224,32 @@ void game_checkinputs()
 
 				config.fullscreen = fullscreen & SDL_FULLSCREEN;
 
-				video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+				video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
 				SDL_UpdateRect(video, 0, 0, config.scr_width, config.scr_height);
 			}
 			break;
 
 		case SDLK_LCTRL:
-			if(itemselon == 0 && itemticks < ticks) game_attack();
+			if(selenemyon && monster_target && controlled_npc == 0) {
+				controlled_npc = curenemy;
+				selenemyon = 0;
+				monster_target = 0;
+				game_addFloatText("CONTROLLED", npcinfo[curenemy].x, npcinfo[curenemy].y, 3);
+				itemticks = ticks + 250;
+			} else if(controlled_npc > 0 && itemticks < ticks) debug_controlledattack(0);
+			else if(itemselon == 0 && itemticks < ticks) game_attack();
 
 			if(itemselon == 1 && itemticks < ticks) {
 				if(curitem == 0 && player.inventory[INV_FLASK] > 0) {
 					itemticks = ticks + ntickdelay;
+
+					if(player.hp >= player.maxhp) {
+						if(menabled == 1 && config.effects == 1) {
+							int snd = Mix_PlayChannel(-1, sfx[sndbeep], 0);
+							Mix_Volume(snd, config.effectsvol);
+						}
+						break;
+					}
 
 					int heal = 50;
 					int maxh = player.maxhp - player.hp;
@@ -1052,11 +1270,19 @@ void game_checkinputs()
 					}
 
 					itemselon = 0;
-					forcepause = 0;
+					game_setpause(0);
 				}
 
 				if(curitem == 1 && player.inventory[INV_DOUBLEFLASK] > 0) {
 					itemticks = ticks + ntickdelay;
+
+					if(player.hp >= player.maxhp) {
+						if(menabled == 1 && config.effects == 1) {
+							int snd = Mix_PlayChannel(-1, sfx[sndbeep], 0);
+							Mix_Volume(snd, config.effectsvol);
+						}
+						break;
+					}
 
 					int heal = 200;
 					int maxh = player.maxhp - player.hp;
@@ -1077,14 +1303,14 @@ void game_checkinputs()
 					}
 
 					itemselon = 0;
-					forcepause = 0;
+					game_setpause(0);
 
 				}
 
 				if(curitem == 2 && player.inventory[INV_SHOCK] > 0) {
 					game_castspell(8, player.px, player.py, npcinfo[curenemy].x, npcinfo[curenemy].y, 0);
 
-					forcepause = 1;
+					game_setpause(1);
 
 					player.inventory[INV_SHOCK]--;
 
@@ -1123,7 +1349,7 @@ void game_checkinputs()
 
 					player.spellcharge[0] = 0;
 
-					forcepause = 1;
+					game_setpause(0);
 
 					itemticks = ticks + ntickdelay;
 					selenemyon = 0;
@@ -1145,7 +1371,7 @@ void game_checkinputs()
 					itemticks = ticks + ntickdelay;
 					selenemyon = 0;
 					itemselon = 0;
-					forcepause = 0;
+					game_setpause(0);
 				}
 
 				if(curitem > 5 && selenemyon == 0 && itemselon == 1) {
@@ -1179,16 +1405,22 @@ void game_checkinputs()
 			break;
 
 		case SDLK_LALT:
+			if(controlled_npc > 0 && itemticks < ticks) {
+				debug_controlledattack(1);
+				itemticks = ticks + ntickdelay;
+				break;
+			}
 			if(itemticks < ticks) {
 				selenemyon = 0;
+				monster_target = 0;
 				if(itemselon == 1) {
 					itemselon = 0;
 					itemticks = ticks + 220;
-					forcepause = 0;
+					game_setpause(0);
 				} else {
 					itemselon = 1;
 					itemticks = ticks + 220;
-					forcepause = 1;
+					game_setpause(1);
 					player.itemselshade = 0;
 				}
 			}
@@ -1204,10 +1436,10 @@ void game_checkinputs()
 		movingdown = 0;
 		movingleft = 0;
 		movingright = 0;
-		if(keys[SDLK_UP]) movingup = 1;
-		if(keys[SDLK_DOWN]) movingdown = 1;
-		if(keys[SDLK_LEFT]) movingleft = 1;
-		if(keys[SDLK_RIGHT]) movingright = 1;
+		if(keys[config.key_up]) movingup = 1;
+		if(keys[config.key_down]) movingdown = 1;
+		if(keys[config.key_left]) movingleft = 1;
+		if(keys[config.key_right]) movingright = 1;
 	} else {
 		movingup = 0;
 		movingdown = 0;
@@ -1216,7 +1448,7 @@ void game_checkinputs()
 
 		if(selenemyon == 1) {
 			if(itemticks < ticks) {
-				if(keys[SDLK_LEFT]) {
+				if(keys[config.key_left]) {
 					int origin = curenemy;
 					do {
 						curenemy = curenemy - 1;
@@ -1227,7 +1459,7 @@ void game_checkinputs()
 					} while(1);
 					itemticks = ticks + ntickdelay;
 				}
-				if(keys[SDLK_RIGHT]) {
+				if(keys[config.key_right]) {
 					int origin = curenemy;
 					do {
 						curenemy = curenemy + 1;
@@ -1245,23 +1477,23 @@ void game_checkinputs()
 			}
 		} else {
 			if(itemticks < ticks) {
-				if(keys[SDLK_UP]) {
+				if(keys[config.key_up]) {
 					curitem = curitem - 1;
 					itemticks = ticks + ntickdelay;
 					if(curitem == 4) curitem = 9;
 					if(curitem == -1) curitem = 4;
 				}
-				if(keys[SDLK_DOWN]) {
+				if(keys[config.key_down]) {
 					curitem = curitem + 1;
 					itemticks = ticks + ntickdelay;
 					if(curitem == 5) curitem = 0;
 					if(curitem == 10) curitem = 5;
 				}
-				if(keys[SDLK_LEFT]) {
+				if(keys[config.key_left]) {
 					curitem = curitem - 5;
 					itemticks = ticks + ntickdelay;
 				}
-				if(keys[SDLK_RIGHT]) {
+				if(keys[config.key_right]) {
 					curitem = curitem + 5;
 					itemticks = ticks + ntickdelay;
 				}
@@ -1310,9 +1542,7 @@ void game_configmenu()
 	tickwait = 100;
 	keypause = ticks + tickwait;
 
-	configwindow = SDL_DisplayFormat(videobuffer);
-
-	configwindow = IMG_Load("art/configwindow.bmp");
+	configwindow = sys_loadimage("art/configwindow.bmp");
 	SDL_SetColorKey(configwindow, SDL_SRCCOLORKEY, SDL_MapRGB(configwindow->format, 255, 0, 255));
 	SDL_SetAlpha(configwindow, SDL_SRCALPHA, 160);
 
@@ -1342,8 +1572,8 @@ void game_configmenu()
 
 		int sy = SY;
 
-		for(int i = 0; i <= 21; i++) {
-			static char *vr[22] = {
+		for(int i = 0; i <= 22; i++) {
+			static char *vr[23] = {
 #ifdef OPENDINGUX
 				"", "",
 				"", "", "", "",
@@ -1352,13 +1582,14 @@ void game_configmenu()
 				"Resolution:", "",
 				"Bit Depth:", "", "", "",
 				"Start Fullscreen:", "", "",
+				"Stretch Screen:", "", "",
 #endif
 				"Music:", "", "",
 				"Sound Effects:", "", "",
 				"Music Volume:", "",
-				"Effects Volume:", "", "", "", ""
+				"Effects Volume:", "", ""
 			};
-			static char *vl[22] = {
+			static char *vl[23] = {
 #ifdef OPENDINGUX
 				"", "",
 				"", "", "", "",
@@ -1367,19 +1598,18 @@ void game_configmenu()
 				"320x240", "640x480",
 				"16", "24", "32", "",
 				"Yes", "No", "",
+				"Yes", "No", "",
 #endif
 				"On", "Off", "",
 				"On", "Off", "",
 				"[----------]", "",
-				"[----------]", "",
-				"Exit + Save", "",
-				"Exit"
+				"[----------]", "", "Exit"
 			};
 
 			static char line[24];
 
-			if(i == 15 || i == 17) {
-				int vol = (i == 15 ? config.musicvol : config.effectsvol) * 9 / 255;
+			if(i == 18 || i == 20) {
+				int vol = (i == 18 ? config.musicvol : config.effectsvol) * 9 / 255;
 				if(vol < 0) vol = 0;
 				if(vol > 9) vol = 9;
 
@@ -1396,12 +1626,14 @@ void game_configmenu()
 			if(i == 4 && config.scr_bpp == 32) cl = 0;
 			if(i == 6 && config.fullscreen != 0) cl = 0;
 			if(i == 7 && config.fullscreen == 0) cl = 0;
-			if(i == 9 && config.music == 1) cl = 0;
-			if(i == 10 && config.music == 0) cl = 0;
-			if(i == 12 && config.effects == 1) cl = 0;
-			if(i == 13 && config.effects == 0) cl = 0;
+			if(i == 9 && config.stretch != 0) cl = 0;
+			if(i == 10 && config.stretch == 0) cl = 0;
+			if(i == 12 && config.music == 1) cl = 0;
+			if(i == 13 && config.music == 0) cl = 0;
+			if(i == 15 && config.effects == 1) cl = 0;
+			if(i == 16 && config.effects == 0) cl = 0;
 
-			if(i > 18) cl = 0;
+			if(i > 20) cl = 0;
 
 			sys_print(videobuffer, vr[i], 156 - 8 * strlen(vr[i]), sy + i * 8, 0);
 			sys_print(videobuffer, vl[i], 164, sy + i * 8, cl);
@@ -1412,9 +1644,9 @@ void game_configmenu()
 		if(cursel > 6) curselt = curselt + 1;
 		if(cursel > 8) curselt = curselt + 1;
 		if(cursel > 10) curselt = curselt + 1;
-		if(cursel > 11) curselt = curselt + 1;
 		if(cursel > 12) curselt = curselt + 1;
 		if(cursel > 13) curselt = curselt + 1;
+		if(cursel > 14) curselt = curselt + 1;
 
 		rc.x = 148 + 3 * cos(3.14159 * 2 * itemyloc / 16.0);
 		rc.y = sy + 8 * curselt - 4;
@@ -1441,22 +1673,22 @@ void game_configmenu()
 		while(itemyloc >= 16) itemyloc -= 16;
 
 		if(keypause < ticks) {
-			SDL_PollEvent(&event);
+			sys_pollevent();
 			keys = SDL_GetKeyState(NULL);
 
 			if(event.type == SDL_KEYDOWN) {
 				keypause = ticks + tickwait;
 
-				if(keys[SDLK_ESCAPE]) break;
+				if(keys[config.key_menu]) break;
 
-				if(keys[SDLK_LEFT]) {
-					if(cursel == 11) {
+				if(keys[config.key_left]) {
+					if(cursel == 13) {
 						config.musicvol = config.musicvol - 25;
 						if(config.musicvol < 0) config.musicvol = 0;
 
 						Mix_Volume(musicchannel, config.musicvol);
 						Mix_Volume(menuchannel, config.musicvol);
-					} else if(cursel == 12) {
+					} else if(cursel == 14) {
 						config.effectsvol = config.effectsvol - 25;
 						if(config.effectsvol < 0) config.effectsvol = 0;
 
@@ -1470,14 +1702,14 @@ void game_configmenu()
 						}
 					}
 				}
-				if(keys[SDLK_RIGHT]) {
-					if(cursel == 11) {
+				if(keys[config.key_right]) {
+					if(cursel == 13) {
 						config.musicvol = config.musicvol + 25;
 						if(config.musicvol > 255) config.musicvol = 255;
 
 						Mix_Volume(musicchannel, config.musicvol);
 						Mix_Volume(menuchannel, config.musicvol);
-					} else if(cursel == 12) {
+					} else if(cursel == 14) {
 						config.effectsvol = config.effectsvol + 25;
 						if(config.effectsvol > 255) config.effectsvol = 255;
 
@@ -1492,22 +1724,22 @@ void game_configmenu()
 					}
 				}
 
-				if(keys[SDLK_UP]) {
+				if(keys[config.key_up]) {
 					cursel--;
-					if(cursel < MINCURSEL) cursel = 14;
+					if(cursel < MINCURSEL) cursel = 15;
 				}
-				if(keys[SDLK_DOWN]) {
+				if(keys[config.key_down]) {
 					cursel++;
-					if(cursel > 14) cursel = MINCURSEL;
+					if(cursel > 15) cursel = MINCURSEL;
 				}
 
-				if(keys[SDLK_LCTRL] || keys[SDLK_RETURN]) {
+				if(keys[config.key_attack] || keys[SDLK_RETURN]) {
 					if(cursel == 0) {
 						fullscreen = config.fullscreen | config.hwaccel | config.hwsurface;
 
-						video = SDL_SetVideoMode(320, 240, config.scr_bpp, fullscreen);
+						video = game_setvideomode(320, 240, config.scr_bpp, fullscreen);
 						if(video == 0) {
-							video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+							video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
 						} else {
 							config.scr_width = 320;
 							config.scr_height = 240;
@@ -1518,9 +1750,9 @@ void game_configmenu()
 					if(cursel == 1) {
 						fullscreen = config.fullscreen | config.hwaccel | config.hwsurface;
 
-						video = SDL_SetVideoMode(640, 480, config.scr_bpp, fullscreen);
+						video = game_setvideomode(640, 480, config.scr_bpp, fullscreen);
 						if(video == 0) {
-							video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+							video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
 						} else {
 							config.scr_width = 640;
 							config.scr_height = 480;
@@ -1534,9 +1766,9 @@ void game_configmenu()
 						int b = 16;
 						if(cursel == 3) b = 24;
 						if(cursel == 4) b = 32;
-						video = SDL_SetVideoMode(config.scr_width, config.scr_height, b, fullscreen);
+						video = game_setvideomode(config.scr_width, config.scr_height, b, fullscreen);
 						if(video == 0) {
-							video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+							video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
 						} else {
 							config.scr_bpp = b;
 						}
@@ -1547,9 +1779,9 @@ void game_configmenu()
 						ofullscreen = config.fullscreen | config.hwaccel | config.hwsurface;
 						fullscreen = SDL_FULLSCREEN | config.hwaccel | config.hwsurface;
 
-						video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+						video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
 						if(video == 0) {
-							video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, ofullscreen);
+							video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, ofullscreen);
 						} else {
 							config.fullscreen = SDL_FULLSCREEN;
 						}
@@ -1560,28 +1792,32 @@ void game_configmenu()
 						ofullscreen = config.fullscreen | config.hwaccel | config.hwsurface;
 						fullscreen = 0 | config.hwaccel | config.hwsurface;
 
-						video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+						video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
 						if(video == 0) {
-							video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, ofullscreen);
+							video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, ofullscreen);
 						} else {
 							config.fullscreen = 0;
 						}
 
 						SDL_UpdateRect(video, 0, 0, config.scr_width, config.scr_height);
 					}
-					if(cursel == 7 && config.music == 0) {
+					if(cursel == 7 || cursel == 8) {
+						config.stretch = cursel == 7;
+						video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen);
+					}
+					if(cursel == 9 && config.music == 0) {
 						config.music = 1;
 						if(menabled == 1) {
 							menuchannel = Mix_PlayChannel(-1, mmenu, -1);
 							Mix_Volume(menuchannel, config.musicvol);
 						}
 					}
-					if(cursel == 8 && config.music == 1) {
+					if(cursel == 10 && config.music == 1) {
 						config.music = 0;
 						Mix_HaltChannel(musicchannel);
 						Mix_HaltChannel(menuchannel);
 					}
-					if(cursel == 9 && config.effects == 0) {
+					if(cursel == 11 && config.effects == 0) {
 						config.effects = 1;
 						if(menabled == 1) {
 							int snd = Mix_PlayChannel(-1, sfx[snddoor], 0);
@@ -1589,15 +1825,10 @@ void game_configmenu()
 						}
 					}
 
-					if(cursel == 10 && config.effects == 1) config.effects = 0;
+					if(cursel == 12 && config.effects == 1) config.effects = 0;
 
-					if(cursel == 13) {
+					if(cursel == 15) {
 						config_save(&config);
-						break;
-					}
-
-					if(cursel == 14) {
-						// reset keys to avoid returning
 						keys[SDLK_SPACE] = keys[SDLK_RETURN] = 0;
 						break;
 					}
@@ -1608,8 +1839,7 @@ void game_configmenu()
 		clouddeg += 0.01 * fpsr;
 		while(clouddeg >= 360) clouddeg = clouddeg - 360;
 
-		SDL_Delay(5);
-	} while(1);
+		} while(1);
 
 	SDL_FreeSurface(configwindow);
 	itemticks = ticks + 210;
@@ -1652,6 +1882,17 @@ static void spawn_chest(int cx, int cy, int obj_id, int flag_idx) {
 	if (flag_idx >= 0) scriptflag[flag_idx][0] = 1;
 }
 
+static void game_spellhit(int spellslot, int npcnum, float damage)
+{
+	if(npcnum == controlled_npc || npcinfo[npcnum].hp <= 0 || spellinfo[spellslot].hitnext[npcnum] > game_time) return;
+	spellinfo[spellslot].hitnext[npcnum] = game_time + 900;
+
+	damage += npcinfo[npcnum].spelldamagecarry;
+	int wholedamage = (int)damage;
+	npcinfo[npcnum].spelldamagecarry = damage - wholedamage;
+	if(wholedamage > 0) game_damagenpc(npcnum, wholedamage, 1);
+}
+
 void game_damagenpc(int npcnum, int damage, int spell)
 {
 	char line[256];
@@ -1677,6 +1918,7 @@ void game_damagenpc(int npcnum, int damage, int spell)
 
 			npcinfo[npcnum].hp -= damage;
 			if(npcinfo[npcnum].hp < 0) npcinfo[npcnum].hp = 0;
+			if(controlled_npc > 0 && npcnum != controlled_npc) npcinfo[npcnum].aggro = 1;
 
 			sprintf(line, "-%i", damage);
 			fcol = 1;
@@ -1688,7 +1930,7 @@ void game_damagenpc(int npcnum, int damage, int spell)
 			fcol = 5;
 		}
 
-		npcinfo[npcnum].pause = ticks + 900;
+		npcinfo[npcnum].pause = game_time + 900;
 
 		if(spell == 0) player.attackstrength = ratio;
 	}
@@ -1702,7 +1944,7 @@ void game_damagenpc(int npcnum, int damage, int spell)
 	// if enemy is killed
 	if(npcinfo[npcnum].hp != 0) return;
 
-	player.exp += npcinfo[npcnum].maxhp;
+	if(controlled_npc == 0 && !npc_infight) player.exp += npcinfo[npcnum].maxhp;
 
 	// Random drops based on spriteset
 	if(npcinfo[npcnum].spriteset == 1 || npcinfo[npcnum].spriteset == 7 || npcinfo[npcnum].spriteset == 6) {
@@ -1781,6 +2023,12 @@ void game_damageplayer(int damage)
 {
 	char line[256];
 
+	if(ai_target > 0) {
+		game_damagenpc(ai_target, damage, 1);
+		return;
+	}
+	if(cheat_god) return;
+
 	//improvement. Now shield and armour gives defense bonus. No more intense hard grinding.
 	damage = (damage - (damage * (player.shield + player.armour) / 20) > 1) ? damage - (damage * (player.shield + player.armour) / 20) : 1;
 
@@ -1792,7 +2040,7 @@ void game_damageplayer(int damage)
 
 	game_addFloatText(line, player.px + 12 - 4 * strlen(line), player.py + 16, 4);
 
-	player.pause = ticks + 1000;
+	player.pause = game_time + 1000;
 
 	//printf("Player shield/armor: %i/%i\n", player.shield, player.armour);
 	//printf("Player total_def: %i\n", total_def);
@@ -1892,22 +2140,13 @@ void game_drawhud()
 {
 	char line[128];
 
-	if (config.showdbginfo == 1) {
-		sprintf(line,  "fps: %i, map: %i, exp: %i/%i ", (int)fps, curmap, player.exp, player.nextlevel);
-		sys_print(videobuffer, line, 0, 0, 0);
-		//sprintf(line,  "sword: %i, shield: %i, armour: %i", (int)player.sword, player.shield, player.armour);
-		//sys_print(videobuffer, line, 0, 10, 0);
-		sprintf(line, "sworddmg: %i, spelldmg: %i", (int)player.sworddamage, player.spelldamage);
-		sys_print(videobuffer, line, 0, 10, 0);
-		//sprintf(line,  "foundspell: %i/%i", (int)player.foundspell);
-		//sys_print(videobuffer, line, 0, 20, 0);
-	}
+	if(config.showdbginfo == 1) debug_drawhud();
 
 	long ccc;
 
 	game_fillrect(videobuffer2, 0, 0, 320, 240, 0);
 
-	for(int i = 0; i < MAXFLOAT; i++) {
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++) {
 		if(floattext[i][0] > 0) {
 			int fc = (int)floattext[i][3];
 			int c = fc, c2 = 3;
@@ -2047,6 +2286,10 @@ void game_drawhud()
 				hud_recalc(player.spellstrength, 54, 100), 2,
 				player.spellstrength == 100 ? RGB(224, 0, 0) : RGB(128, 0, 224));
 
+		sprintf(line, "S:%i M:%i D:%i%%", player.sworddamage, player.spelldamage,
+			(player.shield + player.armour) * 5);
+		sys_print(videobuffer, line, 54, 80, 0);
+
 		// time
 		int ase = secstart + secsingame;
 		int h = ((ase - (ase % 3600)) / 3600);
@@ -2183,8 +2426,8 @@ void game_drawnpcs(int mode)
 						rcDest.w = 24;
 						rcDest.h = 24;
 
-						if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-							npcinfo[i].shake = ticks + 50;
+						if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+							npcinfo[i].shake = game_time + 50;
 							rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 							rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 						}
@@ -2368,8 +2611,8 @@ void game_drawnpcs(int mode)
 					rcDest.w = 24;
 					rcDest.h = 24;
 
-					if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-						npcinfo[i].shake = ticks + 50;
+					if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+						npcinfo[i].shake = game_time + 50;
 						rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 						rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 					}
@@ -2392,8 +2635,8 @@ void game_drawnpcs(int mode)
 						rcDest.w = 24;
 						rcDest.h = 24;
 
-						if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-							npcinfo[i].shake = ticks + 50;
+						if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+							npcinfo[i].shake = game_time + 50;
 							rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 							rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 						}
@@ -2429,8 +2672,8 @@ void game_drawnpcs(int mode)
 					rcDest.w = 24;
 					rcDest.h = 24;
 
-					if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-						npcinfo[i].shake = ticks + 50;
+					if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+						npcinfo[i].shake = game_time + 50;
 						rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 						rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 					}
@@ -2470,8 +2713,8 @@ void game_drawnpcs(int mode)
 						rcDest.w = 24;
 						rcDest.h = 24;
 
-						if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-							npcinfo[i].shake = ticks + 50;
+						if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+							npcinfo[i].shake = game_time + 50;
 							rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 							rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 						}
@@ -2551,7 +2794,7 @@ void game_drawnpcs(int mode)
 							int xdif = (xloc + 8) - (player.px + 12);
 							int ydif = (yloc + 8) - (player.py + 12);
 
-							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < ticks) {
+							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < game_time) {
 								float damage = (float)npcinfo[i].spelldamage * (1.0 + RND() * 0.5);
 
 								if(player.hp > 0) {
@@ -2577,7 +2820,7 @@ void game_drawnpcs(int mode)
 							xdif = (xloc + 8) - (player.px + 12);
 							ydif = (yloc + 8) - (player.py + 12);
 
-							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < ticks) {
+							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < game_time) {
 								float damage = (float)npcinfo[i].spelldamage * (1.0 + RND() * 0.5);
 
 								if(player.hp > 0) {
@@ -2603,8 +2846,8 @@ void game_drawnpcs(int mode)
 						rcDest.x = sx;
 						rcDest.y = sy;
 
-						if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-							npcinfo[i].shake = ticks + 50;
+						if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+							npcinfo[i].shake = game_time + 50;
 							rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 							rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 						}
@@ -2656,8 +2899,8 @@ void game_drawnpcs(int mode)
 					rcDest.w = 99;
 					rcDest.h = 80;
 
-					if(npcinfo[i].pause > ticks && npcinfo[i].shake < ticks) {
-						npcinfo[i].shake = ticks + 50;
+					if(npcinfo[i].pause > game_time && npcinfo[i].shake < game_time) {
+						npcinfo[i].shake = game_time + 50;
 						rcDest.x = rcDest.x + (int)(RND() * 3) - 1;
 						rcDest.y = rcDest.y + (int)(RND() * 3) - 1;
 					}
@@ -2685,6 +2928,29 @@ void game_drawnpcs(int mode)
 
 
 				SDL_FillRect(videobuffer, &rcDest, ccc);
+
+				if(i == controlled_npc) {
+					for(int bar = 0; bar < 2; bar++) {
+						rcDest.x = npx + 4;
+						rcDest.y = npy + 25 + bar * 3;
+						rcDest.w = 16;
+						rcDest.h = 4;
+						SDL_FillRect(videobuffer, &rcDest, 0);
+
+						int remaining = (bar == 0 ? npcinfo[i].specialnext : npcinfo[i].attacknext) - game_time;
+						int cooldown = npcinfo[i].attackdelay * (bar == 0 ? 2 : 1);
+						int charge = 14;
+						if(remaining > 0 && cooldown > 0) charge = 14 - 14 * remaining / cooldown;
+						if(charge < 0) charge = 0;
+						if(charge > 14) charge = 14;
+						rcDest.x = npx + 5;
+						rcDest.y = npy + 26 + bar * 3;
+						rcDest.w = charge;
+						rcDest.h = 2;
+						SDL_FillRect(videobuffer, &rcDest, SDL_MapRGB(videobuffer->format,
+							bar == 0 ? 64 : 224, bar == 0 ? 192 : 128, bar == 0 ? 255 : 32));
+					}
+				}
 
 				int pass = 1;
 
@@ -2875,6 +3141,7 @@ void game_drawview()
 	}
 
 	game_drawhud();
+	game_draweventtext();
 
 	SDL_BLITVIDEO(videobuffer, NULL, video, NULL);
 }
@@ -2926,7 +3193,7 @@ void game_endofgame()
 		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, ya);
 		SDL_BlitSurface(videobuffer2, NULL, videobuffer3, NULL);
 		SDL_BlitSurface(videobuffer, NULL, videobuffer3, NULL);
-		SDL_BlitSurface(videobuffer3, NULL, video, NULL);
+		SDL_BLITVIDEO(videobuffer3, NULL, video, NULL);
 		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, 255);
 
 		SDL_Flip(video);
@@ -2984,13 +3251,13 @@ void game_endofgame()
 		xofs = xofs + add;
 		if(xofs >= 320) xofs = xofs - 320;
 
-		SDL_PollEvent(&event);
+		sys_pollevent();
 		keys = SDL_GetKeyState(NULL);
 
 		if(event.type == SDL_KEYDOWN) spd = 1;
 		if(event.type == SDL_KEYUP) spd = 0.2;
 
-		if(keys[SDLK_ESCAPE]) break;
+		if(keys[config.key_menu]) break;
 	} while(1);
 
 
@@ -3000,20 +3267,18 @@ void game_endofgame()
 	SDL_BlitSurface(videobuffer, NULL, videobuffer2, NULL);
 
 	do {
-		if(ticks < ticks1 + 1500) {
-			int y = 255 * (ticks - ticks1) / 1500;
-			if(y < 0) y = 0;
-			if(y > 255) y = 255;
-		else
-			break;
-		}
+		if(ticks >= ticks1 + 1500) break;
+
+		y = 255 * (ticks - ticks1) / 1500;
+		if(y < 0) y = 0;
+		if(y > 255) y = 255;
 
 		SDL_FillRect(videobuffer, NULL, 0);
 
 		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, y);
 		SDL_BlitSurface(videobuffer2, NULL, videobuffer3, NULL);
 		SDL_BlitSurface(videobuffer, NULL, videobuffer3, NULL);
-		SDL_BlitSurface(videobuffer3, NULL, video, NULL);
+		SDL_BLITVIDEO(videobuffer3, NULL, video, NULL);
 		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, 255);
 
 		SDL_Flip(video);
@@ -3047,7 +3312,7 @@ void game_endofgame()
 
 		sys_tickcalc();
 
-		SDL_PollEvent(&event);
+		sys_pollevent();
 		keys = SDL_GetKeyState(NULL);
 
 		if(event.type == SDL_KEYDOWN && keywait < ticks) break;
@@ -3063,55 +3328,44 @@ void game_endofgame()
 
 void game_eventtext(char *stri)
 {
-	int x, fr, pauseticks, bticks;
-
-	SDL_FillRect(videobuffer2, NULL, 0);
-	SDL_FillRect(videobuffer3, NULL, 0);
-
-	x = 160 - 4 * strlen(stri);
-
-	pauseticks = ticks + 500;
-	bticks = ticks;
-
-	SDL_BlitSurface(videobuffer, NULL, videobuffer3, NULL);
-	SDL_BlitSurface(videobuffer, NULL, videobuffer2, NULL);
-
-	do {
-		SDL_PollEvent(&event);
-		keys = SDL_GetKeyState(NULL);
-
-		if(event.type == SDL_KEYDOWN && pauseticks < ticks) break;
-		SDL_BlitSurface(videobuffer2, NULL, videobuffer, NULL);
-
-		fr = 192;
-
-		if(pauseticks > ticks) fr = 192 * (ticks - bticks) / 500;
-		if(fr > 192) fr = 192;
-
-		SDL_SetAlpha(windowimg, SDL_SRCALPHA, fr);
-
-		SDL_BlitSurface(windowimg, NULL, videobuffer, NULL);
-		if(pauseticks < ticks) sys_print(videobuffer, stri, x, 15, 0);
-
-		SDL_SetAlpha(windowimg, SDL_SRCALPHA, 255);
-		SDL_BLITVIDEO(videobuffer, NULL, video, NULL);
-
-		SDL_Flip(video);
-		SDL_PumpEvents();
-
-		sys_tickcalc();
-
-		SDL_Delay(10);
-	} while(1);
-
-	SDL_BlitSurface(videobuffer3, NULL, videobuffer, NULL);
-
+	snprintf(eventtext, sizeof(eventtext), "%s", stri);
+	eventtextstart = ticks;
+	eventtextend = ticks + 2500;
 	itemticks = ticks + 210;
+}
+
+void game_draweventtext()
+{
+	if(eventtextend <= ticks || eventtext[0] == '\0') return;
+
+	int elapsed = ticks - eventtextstart;
+	int remaining = eventtextend - ticks;
+	int alpha = 192;
+
+	if(elapsed < 500) alpha = 192 * elapsed / 500;
+	if(remaining < 500) alpha = 192 * remaining / 500;
+	if(alpha < 0) alpha = 0;
+	if(alpha > 192) alpha = 192;
+
+	SDL_SetAlpha(windowimg, SDL_SRCALPHA, alpha);
+	SDL_BlitSurface(windowimg, NULL, videobuffer, NULL);
+	SDL_SetAlpha(windowimg, SDL_SRCALPHA, 255);
+
+	if(elapsed >= 500) {
+		int x = 160 - 4 * strlen(eventtext);
+		sys_print(videobuffer, eventtext, x, 15, 0);
+	}
 }
 
 
 void game_handlewalking()
 {
+	if(selenemyon && monster_target && controlled_npc == 0) return;
+	if(controlled_npc > 0) {
+		debug_handlecontrollednpc();
+		return;
+	}
+
 	unsigned int *temp/*, c*/, bgc;
 	float spd, /*ppx, ppy,*/ px, py, opx, opy;
 	float nx, ny, npx, npy;
@@ -3156,6 +3410,8 @@ void game_handlewalking()
 			}
 		}
 	}
+
+	if(cheat_noclip) memset(clipsurround, 0, sizeof(clipsurround));
 
 	if(movingup) player.walkdir = 0;
 	if(movingdown) player.walkdir = 1;
@@ -3238,7 +3494,7 @@ void game_handlewalking()
 	int sy = (py / 2 + 10);
 	temp = clipbg->pixels + sy * clipbg->pitch + sx * clipbg->format->BytesPerPixel;
 	bgc = *temp;
-	if(bgc > 0 && bgc != 1000) {
+	if(!cheat_noclip && bgc > 0 && bgc != 1000) {
 		px = opx;
 		py = opy;
 		pass = 0;
@@ -3357,8 +3613,79 @@ void game_handlewalking()
 	}
 }
 
+static const struct {
+	int hp;
+	int attackdelay;
+	int attackdamage;
+	int spelldamage;
+	float walkspd;
+} npc_stats[13] = {
+	{0, 0, 0, 0, 0},
+	{12, 2000, 2, 0, 1},
+	{200, 2000, 24, 30, 1.4},
+	{300, 2200, 0, 30, 1.2},
+	{200, 2800, 0, 30, 1},
+	{600, 2200, 50, 30, 1.3},
+	{20, 1500, 0, 12, 1},
+	{40, 5000, 0, 8, 1},
+	{100, 1500, 0, 24, 1},
+	{140, 2000, 30, 0, 1},
+	{80, 1500, 24, 0, 1},
+	{1200, 2000, 100, 60, 1},
+	{800, 2000, 100, 50, 1}
+};
+
+int game_readmap(const char *name, int tempmap[320][200])
+{
+	FILE *fp = fopen(name, "rb");
+	char *data, *cursor;
+	long size;
+
+	if(!fp) return 0;
+	fseek(fp, 0, SEEK_END);
+	size = ftell(fp);
+	rewind(fp);
+	if(size < 0) {
+		fclose(fp);
+		return 0;
+	}
+
+	data = malloc((size_t)size + 1);
+	if(!data) {
+		fclose(fp);
+		return 0;
+	}
+	if(fread(data, 1, (size_t)size, fp) != (size_t)size) {
+		free(data);
+		fclose(fp);
+		return 0;
+	}
+	fclose(fp);
+	data[size] = '\0';
+	cursor = data;
+
+	for(int x = 0; x < 320; x++) {
+		for(int y = 0; y < 200; y++) {
+			char *end;
+			long value = strtol(cursor, &end, 10);
+			if(end == cursor) {
+				free(data);
+				return 0;
+			}
+			tempmap[x][y] = (int)value;
+			cursor = end;
+		}
+	}
+
+	free(data);
+	return 1;
+}
+
 void game_loadmap(int mapnum)
 {
+	controlled_npc = 0;
+	selenemyon = 0;
+	monster_target = 0;
 	unsigned int ccc;
 	SDL_Rect trect;
 	FILE *fp;
@@ -3377,7 +3704,7 @@ void game_loadmap(int mapnum)
 	SDL_FillRect(clipbg, &trect, ccc);
 	SDL_FillRect(clipbg2, &trect, ccc);
 
-	forcepause = 0;
+	game_setpause(0);
 	cloudson = 0;
 	if(mapnum < 6) cloudson = 1;
 	if(mapnum > 41) cloudson = 1;
@@ -3397,19 +3724,18 @@ void game_loadmap(int mapnum)
 	if((mapnum == 53 || mapnum == 57 || mapnum == 61 || mapnum == 65 || mapnum == 62) && scriptflag[60][0] > 0) mapnum = mapnum + 100;
 	if((mapnum == 161 || mapnum == 162) && scriptflag[60][0] == 2) mapnum = mapnum + 100;
 
-	for(int i = 0; i < MAXSPELL; i++)
-		spellinfo[i].frame = 0;
+	for(int i = 0; i < MAXSPELL; i++) {
+		if(spellinfo[i].spellnum != 5) spellinfo[i].frame = 0;
+	}
 
 	roomlock = 0;
 
 	// read *.map file
-	sprintf(name, "mapdb/%04i.map", mapnum); printf("Reading %s\n", name);
-	fp = fopen(name, "r");
-	for(int x = 0; x <= 319; x++)
-		for(int y = 0; y <= 199; y++) {
-			INPUT("%i", &tempmap[x][y]);
-		}
-	fclose(fp);
+	sprintf(name, "mapdb/%04i.map", mapnum);
+	if(!game_readmap(name, tempmap)) {
+		fprintf(stderr, "Failed to load map data: %s\n", name);
+		exit(1);
+	}
 
 	for(int x = 0; x <= 319; x++)
 		for(int y = 0; y <= 239; y++) {
@@ -3419,8 +3745,17 @@ void game_loadmap(int mapnum)
 	// read *.trg file
 	sprintf(name, "mapdb/%04i.trg", mapnum); printf("Reading %s\n", name);
 	fp = fopen(name, "r");
+	if(!fp) {
+		fprintf(stderr, "Failed to load trigger data: %s\n", name);
+		exit(1);
+	}
 
 	INPUT("%i", &ntriggers);
+	if(ntriggers < 0 || ntriggers > 10000) {
+		fprintf(stderr, "Invalid trigger count in %s\n", name);
+		fclose(fp);
+		exit(1);
+	}
 
 	for(int i = 0; i < ntriggers; i++) {
 		int mapx, mapy, trig;
@@ -3429,6 +3764,11 @@ void game_loadmap(int mapnum)
 		INPUT("%i", &mapy);
 		INPUT("%i", &trig);
 
+		if(mapx < 0 || mapx >= 320 || mapy < 0 || mapy >= 240) {
+			fprintf(stderr, "Invalid trigger position in %s\n", name);
+			fclose(fp);
+			exit(1);
+		}
 		triggerloc[mapx][mapy] = trig;
 	}
 	fclose(fp);
@@ -3590,7 +3930,7 @@ void game_loadmap(int mapnum)
 		npcinfo[i].onmap = 0;
 
 	for(int x = 0; x <= 19; x++) {
-		for(int y = 0; y <= 19; y++) {
+		for(int y = 0; y <= 14; y++) {
 			int d = tempmap[3 * 40 + x][y];
 
 			int clip = 0;
@@ -3654,8 +3994,12 @@ void game_loadmap(int mapnum)
 	if(curmap == 82) roomlock = 1;
 
 	// read *.npc file
-	sprintf(name, "mapdb/%04i.npc", mapnum); printf("Reading %s\n", name);
+	sprintf(name, "mapdb/%04i.npc", mapnum);
 	fp = fopen(name, "r");
+	if(!fp) {
+		fprintf(stderr, "Failed to load NPC data: %s\n", name);
+		exit(1);
+	}
 
 	for(int i = 0; i < MAXNPC; i++) {
 		INPUT("%i", &npcinfo[i].spriteset);
@@ -3670,168 +4014,35 @@ void game_loadmap(int mapnum)
 		INPUT("%i", &npcinfo[i].item3);
 		INPUT("%i", &npcinfo[i].script);
 
-		// baby dragon
-		if(npcinfo[i].spriteset == 1) {
-			npcinfo[i].hp = 12;
-			npcinfo[i].attackdelay = 2000;
-
-			npcinfo[i].attackdamage = 2;
-			npcinfo[i].spelldamage = 0;
-
-			npcinfo[i].walkspd = 1;
-
-			if(RND() * 5 == 0) npcinfo[i].hp = 0;
+		int spriteset = npcinfo[i].spriteset;
+		if(spriteset >= 1 && spriteset <= 12) {
+			npcinfo[i].hp = npc_stats[spriteset].hp;
+			npcinfo[i].attackdelay = npc_stats[spriteset].attackdelay;
+			npcinfo[i].attackdamage = npc_stats[spriteset].attackdamage;
+			npcinfo[i].spelldamage = npc_stats[spriteset].spelldamage;
+			npcinfo[i].walkspd = npc_stats[spriteset].walkspd;
 		}
 
-		// onewing
-		if(npcinfo[i].spriteset == 2) {
-			npcinfo[i].hp = 200;
-			npcinfo[i].attackdelay = 2000;
-			npcinfo[i].swayspd = 1;
+		if(spriteset == 2 || spriteset == 9) npcinfo[i].swayspd = 1;
+		if(spriteset == 2) npcinfo[i].castpause = game_time;
+		if(spriteset == 9) npcinfo[i].castpause = 0;
+		if(spriteset == 5) npcinfo[i].swayangle = 0;
+		if(spriteset >= 10) npcinfo[i].floating = RND() * 16;
 
-			npcinfo[i].attackdamage = 24;
-			npcinfo[i].spelldamage = 30;
-
-			npcinfo[i].walkspd = 1.4;
-			npcinfo[i].castpause = ticks;
-		}
-
-		// boss1
-		if(npcinfo[i].spriteset == 3) {
-			npcinfo[i].hp = 300;
-			npcinfo[i].attackdelay = 2200;
-
-			npcinfo[i].attackdamage = 0;
-			npcinfo[i].spelldamage = 30;
-
-			npcinfo[i].walkspd = 1.2;
-		}
-
-		// black knights
-		if(npcinfo[i].spriteset == 4) {
-			npcinfo[i].hp = 200;
-			npcinfo[i].attackdelay = 2800;
-
-			npcinfo[i].attackdamage = 0;
-			npcinfo[i].spelldamage = 30;
-
-			npcinfo[i].walkspd = 1;
-		}
-
-		// boss2 firehydra
-		if(npcinfo[i].spriteset == 5) {
-			npcinfo[i].hp = 600;
-			npcinfo[i].attackdelay = 2200;
-
-			npcinfo[i].attackdamage = 50;
-			npcinfo[i].spelldamage = 30;
-
-			npcinfo[i].walkspd = 1.3;
-
-			npcinfo[i].swayangle = 0;
-		}
-
-		// baby fire dragon
-		if(npcinfo[i].spriteset == 6) {
-			npcinfo[i].hp = 20;
-			npcinfo[i].attackdelay = 1500;
-
-			npcinfo[i].attackdamage = 0;
-			npcinfo[i].spelldamage = 12;
-
-			npcinfo[i].walkspd = 1;
-
-			if(RND() * 5 == 0) npcinfo[i].hp = 0;
-		}
-
-		// priest1
-		if(npcinfo[i].spriteset == 7) {
-			npcinfo[i].hp = 40;
-			npcinfo[i].attackdelay = 5000;
-
-			npcinfo[i].attackdamage = 0;
-			npcinfo[i].spelldamage = 8;
-
-			npcinfo[i].walkspd = 1;
-
-			if(RND() * 8 == 0) npcinfo[i].hp = 0;
-		}
-
-		// yellow fire dragon
-		if(npcinfo[i].spriteset == 8) {
-			npcinfo[i].hp = 100;
-			npcinfo[i].attackdelay = 1500;
-
-			npcinfo[i].attackdamage = 0;
-			npcinfo[i].spelldamage = 24;
-
-			npcinfo[i].walkspd = 1;
-
-			if(RND() * 5 == 0) npcinfo[i].hp = 0;
-		}
-
-		// twowing
-		if(npcinfo[i].spriteset == 9) {
-			npcinfo[i].hp = 140;
-			npcinfo[i].attackdelay = 2000;
-			npcinfo[i].swayspd = 1;
-
-			npcinfo[i].attackdamage = 30;
-			npcinfo[i].spelldamage = 0;
-
-			npcinfo[i].walkspd = 1;
-
-			npcinfo[i].castpause = 0;
-		}
-
-		// dragon2
-		if(npcinfo[i].spriteset == 10) {
-			npcinfo[i].hp = 80;
-			npcinfo[i].attackdelay = 1500;
-
-			npcinfo[i].attackdamage = 24;
-			npcinfo[i].spelldamage = 0;
-
-			npcinfo[i].walkspd = 1;
-
-			npcinfo[i].floating = RND() * 16;
-		}
-
-		// end boss
-		if(npcinfo[i].spriteset == 11) {
-			npcinfo[i].hp = 1200;
-			npcinfo[i].attackdelay = 2000;
-
-			npcinfo[i].attackdamage = 100;
-			npcinfo[i].spelldamage = 60;
-
-			npcinfo[i].walkspd = 1;
-
-			npcinfo[i].floating = RND() * 16;
-		}
-
-		// bat kitty
-		if(npcinfo[i].spriteset == 12) {
-			npcinfo[i].hp = 800;
-			npcinfo[i].attackdelay = 2000;
-
-			npcinfo[i].attackdamage = 100;
-			npcinfo[i].spelldamage = 50;
-
-			npcinfo[i].walkspd = 1;
-
-			npcinfo[i].floating = RND() * 16;
-		}
+		if(config.random_enemies && (spriteset == 1 || spriteset == 6 || spriteset == 8) &&
+			(int)(RND() * 5) == 0) npcinfo[i].hp = 0;
+		if(config.random_enemies && spriteset == 7 && (int)(RND() * 8) == 0) npcinfo[i].hp = 0;
 
 		if(npcinfo[i].onmap == 0) npcinfo[i].hp = 0;
 
 		npcinfo[i].maxhp = npcinfo[i].hp;
+		npcinfo[i].spelldamagecarry = 0;
 
 		npcinfo[i].attacking = 0;
 		npcinfo[i].attackframe = 0;
 		npcinfo[i].cattackframe = 0;
 		npcinfo[i].attackspd = 1.5;
-		npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay * (1 + RND() * 2);
+		npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay * (1 + RND() * 2);
 
 		if(npcinfo[i].spriteset == 2 || npcinfo[i].spriteset == 9) {
 			npcinfo[i].bodysection[0].sprite = 0;
@@ -3908,7 +4119,7 @@ void game_loadmap(int mapnum)
 			}
 		}
 
-		npcinfo[i].pause = ticks;
+		npcinfo[i].pause = game_time;
 	}
 
 	fclose(fp);
@@ -4134,6 +4345,7 @@ void game_main()
 
 void game_newgame()
 {
+	debug_resetcheats();
 	float xofs = 0;
 	float ld = 0, add;
 	int cnt = 0;
@@ -4155,6 +4367,7 @@ void game_newgame()
 
 	secsingame = 0;
 	secstart = 0;
+	game_time = 0;
 
 	int ldstop = 0;
 
@@ -4183,7 +4396,7 @@ void game_newgame()
 			y--;
 		}
 
-		for(int i = 0; i <= 37; i++) {
+		for(int i = 0; i <= 47; i++) {
 			int yy, x;
 
 			yy = y + i * 10;
@@ -4205,14 +4418,13 @@ void game_newgame()
 		xofs += add;
 		if(xofs >= 320) xofs = xofs - 320;
 
-		SDL_PollEvent(&event);
+		sys_pollevent();
 		keys = SDL_GetKeyState(NULL);
 
 		if(event.type == SDL_KEYDOWN) cnt = 6;
-		if(keys[SDLK_ESCAPE]) goto __exit_do;
+		if(keys[config.key_menu]) goto __exit_do;
 
-		SDL_Delay(5);
-	} while(1);
+		} while(1);
 __exit_do:
 
 	player.px = 0;
@@ -4298,6 +4510,13 @@ void game_playgame()
 	}
 
 	do {
+		if(!windowfocused) {
+			sys_pollevent();
+			SDL_Flip(video);
+			sys_tickcalc();
+			continue;
+		}
+
 		if(forcepause == 0) {
 			game_updanims();
 			game_updnpcs();
@@ -4374,7 +4593,7 @@ void game_processtrigger(int trignum)
 		}
 	}
 
-	for(int i = 0; i < MAXFLOAT; i++) {
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++) {
 		floattext[i][0] = 0;
 		floaticon[i][0] = 0;
 	}
@@ -4386,7 +4605,16 @@ void game_saveloadnew()
 	itemselon = 0;
 	float y = 0; int yy;
 	int currow, curcol, lowerlock;
+	int confirm_overwrite = 0;
 	int ticks1, tickpause;
+	PLAYERTYPE savepreview[4];
+	int savepreviewtime[4];
+
+	for(int i = 0; i < 4; i++) {
+		state_load_player(i);
+		savepreview[i] = playera;
+		savepreviewtime[i] = asecstart;
+	}
 
 	clouddeg = 0;
 
@@ -4427,18 +4655,15 @@ void game_saveloadnew()
 
 		SDL_BlitSurface(saveloadimg, NULL, videobuffer, NULL);
 
-		SDL_PollEvent(&event);
+		sys_pollevent();
 		keys = SDL_GetKeyState(NULL);
 
 		if(tickpause < ticks) {
 			if(event.type == SDL_KEYDOWN) {
 				itemticks = ticks + 220;
 
-				if(keys[SDLK_LCTRL] || keys[SDLK_RETURN]) {
-					// QUIT - non existent :)
-					if(currow == 0 && curcol == 4) {
-						exit(1);
-					}
+				if(keys[config.key_attack] || keys[SDLK_RETURN]) {
+					if(currow == 0 && curcol == 4) exit(0);
 					// RETURN
 					if(currow == 0 && curcol == 3) {
 						// reset keys to avoid returning
@@ -4463,17 +4688,24 @@ void game_saveloadnew()
 
 
 					if(lowerlock == 1 && curcol == 1 && tickpause < ticks) {
-						if(state_save(currow - 1)) {
+						if(player.level == 0 && savepreview[currow - 1].level > 0 && !confirm_overwrite) {
+							confirm_overwrite = 1;
+						} else if(state_save(currow - 1)) {
 							secstart = secstart + secsingame;
 							secsingame = 0;
 							lowerlock = 0;
+							confirm_overwrite = 0;
 							saveslot = currow - 1;
+							state_load_player(saveslot);
+							savepreview[saveslot] = playera;
+							savepreviewtime[saveslot] = asecstart;
 							currow = 0;
 						}
 					}
 
 					if(lowerlock == 1 && curcol == 2 && tickpause < ticks) {
 						if(state_load(currow - 1)) {
+							debug_resetcheats();
 							player.walkspd = 1.1;
 							animspd = .5;
 							attacking = 0;
@@ -4499,14 +4731,15 @@ void game_saveloadnew()
 
 				switch(event.key.keysym.sym) {
 				case SDLK_ESCAPE:
-					forcepause = 0;
+					game_setpause(0);
 					if(lowerlock == 0) return;
 					lowerlock = 0;
+					confirm_overwrite = 0;
 					currow = 0;
 					tickpause = ticks + 125;
 					break;
 				case SDLK_DOWN:
-					if(lowerlock == 1) {
+					if(lowerlock == 1 && !confirm_overwrite) {
 						currow = currow + 1;
 						if(currow == 5) currow = 1;
 						tickpause = ticks + 125;
@@ -4514,7 +4747,7 @@ void game_saveloadnew()
 					break;
 
 				case SDLK_UP:
-					if(lowerlock == 1) {
+					if(lowerlock == 1 && !confirm_overwrite) {
 						currow = currow - 1;
 						if(currow == 0) currow = 4;
 						tickpause = ticks + 125;
@@ -4544,10 +4777,10 @@ void game_saveloadnew()
 
 
 		// savestates---------------------------------
-		// read it only when needed!
 
 		for(int ff = 0; ff <= 3; ff++) {
-			state_load_player(ff);
+			playera = savepreview[ff];
+			asecstart = savepreviewtime[ff];
 
 			if(playera.level > 0) {
 				char line[256];
@@ -4640,6 +4873,13 @@ void game_saveloadnew()
 			SDL_BlitSurface(itemimg[15], NULL, videobuffer, &rcDest);
 		}
 
+		if(confirm_overwrite) {
+			game_fillrect(videobuffer, 40, 100, 240, 48, 0);
+			sys_print(videobuffer, "OVERWRITE THIS SAVE?", 80, 108, 4);
+			sys_print(videobuffer, "CTRL/ENTER: CONFIRM", 84, 122, 0);
+			sys_print(videobuffer, "ESC: CANCEL", 108, 134, 0);
+		}
+
 		yy = 255;
 		if(ticks < ticks1 + 1000) {
 			yy = 255 * (ticks - ticks1) / 1000;
@@ -4662,8 +4902,7 @@ void game_saveloadnew()
 		itemyloc += 0.6 * fpsr;
 		while(itemyloc >= 16) itemyloc -= 16;
 
-		SDL_Delay(5);
-	} while(1);
+		} while(1);
 
 	SDL_SetAlpha(cloudimg, SDL_SRCALPHA, 64);
 }
@@ -4709,8 +4948,7 @@ void game_showlogos()
 
 		sys_tickcalc();
 
-		SDL_Delay(10);
-		if(ticks > ticks1 + 4000) break;
+			if(ticks > ticks1 + 4000) break;
 	} while(1);
 }
 
@@ -4718,6 +4956,11 @@ void game_showlogos()
 void game_swash()
 {
 	float y;
+
+	if(config.fastfade) {
+		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, 255);
+		return;
+	}
 
 	y = 0;
 
@@ -4773,7 +5016,7 @@ void game_swash()
 
 void game_theend()
 {
-	for(int i = 0; i < MAXFLOAT; i++) {
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++) {
 		floattext[i][0] = 0;
 		floaticon[i][0] = 0;
 	}
@@ -4871,8 +5114,8 @@ void game_title(int mode)
 		float yf = 255.0;
 		if(ticks < ticks1 + 1000) {
 			yf = 255.0 * ((float)(ticks - ticks1) / 1000.0);
-			if(y < 0.0) yf = 0.0;
-			if(y > 255.0) yf = 255.0;
+			if(yf < 0.0) yf = 0.0;
+			if(yf > 255.0) yf = 255.0;
 		}
 
 		SDL_SetAlpha(videobuffer, SDL_SRCALPHA, (int)yf);
@@ -4892,7 +5135,7 @@ void game_title(int mode)
 		while(itemyloc >= 16)
 			itemyloc = itemyloc - 16;
 
-		SDL_PollEvent(&event);
+		sys_pollevent();
 
 		if(keypause < ticks) {
 			keys = SDL_GetKeyState(NULL);
@@ -4900,14 +5143,14 @@ void game_title(int mode)
 			if(event.type == SDL_KEYDOWN) {
 				keypause = ticks + 150;
 
-				if((keys[SDLK_ESCAPE]) && mode == 1) break;
-				else if(keys[SDLK_UP]) {
+				if((keys[config.key_menu]) && mode == 1) break;
+				else if(keys[config.key_up]) {
 					cursel--;
 					if(cursel < 0) cursel = (mode == 1 ? 3 : 2);
-				} else if(keys[SDLK_DOWN]) {
+				} else if(keys[config.key_down]) {
 					cursel++;
 					if(cursel >= (mode == 1 ? 4 : 3)) cursel = 0;
-				} else if(keys[SDLK_LCTRL] || keys[SDLK_RETURN]) {
+				} else if(keys[config.key_attack] || keys[SDLK_RETURN]) {
 					if(cursel == 0) {
 						game_saveloadnew();
 						ticks = SDL_GetTicks();
@@ -4919,15 +5162,14 @@ void game_title(int mode)
 						keypause = ticks + 150;
 						ticks1 = ticks;
 					} else if(cursel == 2) {
-						exit(1);
+						exit(0);
 					} else if(cursel == 3) break;
 				}
 			}
 		}
 
 		SDL_Flip(video);
-		SDL_Delay(5);
-	} while(1);
+		} while(1);
 
 	itemticks = ticks + 210;
 
@@ -5049,8 +5291,39 @@ void game_updnpcs()
 	float wspd, xdif, ydif;
 	int sx, sy;
 	int dospell = 0;
+	float realpx = player.px, realpy = player.py;
+	int realpause = player.pause;
 
 	for(int i = 1; i <= lastnpc; i++) {
+		player.px = realpx;
+		player.py = realpy;
+		player.pause = realpause;
+		ai_target = 0;
+
+		if((npc_infight || npcinfo[i].aggro) && i != controlled_npc && npcinfo[i].hp > 0) {
+			float best = 1000000;
+			if(npc_infight) {
+				for(int e = 1; e <= lastnpc; e++) {
+					if(e == i || npcinfo[e].hp <= 0) continue;
+					float dx = npcinfo[e].x - npcinfo[i].x;
+					float dy = npcinfo[e].y - npcinfo[i].y;
+					float distance = dx * dx + dy * dy;
+					if(distance < best) {
+						best = distance;
+						ai_target = e;
+					}
+				}
+			} else if(controlled_npc > 0 && npcinfo[controlled_npc].hp > 0) {
+				ai_target = controlled_npc;
+			}
+			if(ai_target > 0) {
+				player.px = npcinfo[ai_target].x;
+				player.py = npcinfo[ai_target].y;
+				player.pause = npcinfo[ai_target].pause;
+			}
+		}
+
+		if(i == controlled_npc) continue;
 		if(npcinfo[i].hp > 0) {
 			//  is npc walking
 			pass = 0;
@@ -5081,8 +5354,8 @@ void game_updnpcs()
 				if(abs(xdif) < 4 * 16 && abs(ydif) < 4 * 16 && mode < 3) mode = 0;
 				if(npcinfo[i].hp < npcinfo[i].maxhp * 0.25) mode = 3;
 
-				if(npcinfo[i].pause > ticks) mode = -1;
-				if(npcinfo[i].spriteset == 2 && npcinfo[i].castpause > ticks) mode = -1;
+				if(npcinfo[i].pause > game_time) mode = -1;
+				if(npcinfo[i].spriteset == 2 && npcinfo[i].castpause > game_time) mode = -1;
 
 				if(mode == 3) {
 					mode = 1;
@@ -5401,7 +5674,7 @@ void game_updnpcs()
 
 				// spriteset1 specific
 				if(npcinfo[i].spriteset == 1 && npcinfo[i].attackattempt < ticks) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npx = npcinfo[i].x;
 						npy = npcinfo[i].y;
 
@@ -5425,7 +5698,7 @@ void game_updnpcs()
 
 				// onewing specific
 				if(npcinfo[i].spriteset == 2) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 							npx = npcinfo[i].x;
 							npy = npcinfo[i].y;
 
@@ -5453,7 +5726,7 @@ void game_updnpcs()
 
 					dospell = 0;
 
-					if(npcinfo[i].attacking == 0 && npcinfo[i].castpause < ticks) {
+					if(npcinfo[i].attacking == 0 && npcinfo[i].castpause < game_time) {
 						npcinfo[i].swayspd = npcinfo[i].swayspd + npcinfo[i].swayspd / 200 * fpsr;
 						if(npcinfo[i].swayspd > 15) {
 							dospell = 1;
@@ -5469,9 +5742,9 @@ void game_updnpcs()
 					}
 
 					if(dospell == 1) {
-						npcinfo[i].pause = ticks + 3000;
-						npcinfo[i].attacknext = ticks + 4500;
-						npcinfo[i].castpause = ticks + 4500;
+						npcinfo[i].pause = game_time + 3000;
+						npcinfo[i].attacknext = game_time + 4500;
+						npcinfo[i].castpause = game_time + 4500;
 
 						game_castspell(3, npcinfo[i].x, npcinfo[i].y, npcinfo[i].x, npcinfo[i].y, i);
 
@@ -5505,16 +5778,16 @@ void game_updnpcs()
 
 				// boss1 specific and blackknight
 				if(npcinfo[i].spriteset == 3 || npcinfo[i].spriteset == 4) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npcinfo[i].attacking = 1;
 						npcinfo[i].attackframe = 0;
 
 						game_castspell(1, npcinfo[i].x, npcinfo[i].y, player.px, player.py, i);
 					}
 
-					if(npcinfo[i].castpause < ticks) {
+					if(npcinfo[i].castpause < game_time) {
 						game_castspell(6, npcinfo[i].x, npcinfo[i].y, player.px, player.py, i);
-						npcinfo[i].castpause = ticks + 12000;
+						npcinfo[i].castpause = game_time + 12000;
 					}
 				}
 
@@ -5529,7 +5802,7 @@ void game_updnpcs()
 
 					for(int ff = 0; ff <= 2; ff++) {
 						if(npcinfo[i].hp > 10 * ff * 20) {
-							if(npcinfo[i].pause < ticks && npcinfo[i].attacking2[ff] == 0 && npcinfo[i].attacknext2[ff] < ticks) {
+							if(npcinfo[i].pause < game_time && npcinfo[i].attacking2[ff] == 0 && npcinfo[i].attacknext2[ff] < game_time) {
 								npx = npcinfo[i].x;
 								npy = npcinfo[i].y;
 
@@ -5589,7 +5862,7 @@ void game_updnpcs()
 
 				// spriteset6 specific
 				if(npcinfo[i].spriteset == 6 && npcinfo[i].attackattempt < ticks) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npx = npcinfo[i].x;
 						npy = npcinfo[i].y;
 
@@ -5636,23 +5909,23 @@ void game_updnpcs()
 
 				// wizard1 specific
 				if(npcinfo[i].spriteset == 7) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npcinfo[i].attacking = 1;
 						npcinfo[i].attackframe = 0;
 
 						game_castspell(9, npcinfo[i].x, npcinfo[i].y, player.px, player.py, i);
 					}
 
-					if(npcinfo[i].castpause < ticks) {
+					if(npcinfo[i].castpause < game_time) {
 						// game_castspell 6, npcinfo[i].x, npcinfo[i].y, player.px, player.py, i
-						// npcinfo[i].castpause = ticks + 12000
+						// npcinfo[i].castpause = game_time + 12000
 					}
 
 				}
 
 				// spriteset6 specific
 				if(npcinfo[i].spriteset == 8 && npcinfo[i].attackattempt < ticks) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npx = npcinfo[i].x;
 						npy = npcinfo[i].y;
 
@@ -5703,7 +5976,7 @@ void game_updnpcs()
 
 				// twowing specific
 				if(npcinfo[i].spriteset == 9) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 							npx = npcinfo[i].bodysection[7].x;
 							npy = npcinfo[i].bodysection[7].y;
 
@@ -5729,7 +6002,7 @@ void game_updnpcs()
 
 					}
 
-					if(npcinfo[i].attacking == 0 && npcinfo[i].castpause < ticks) {
+					if(npcinfo[i].attacking == 0 && npcinfo[i].castpause < game_time) {
 						npcinfo[i].swayspd = 4;
 
 						// sway code
@@ -5741,9 +6014,9 @@ void game_updnpcs()
 					}
 
 					if(dospell == 1) {
-						npcinfo[i].pause = ticks + 3000;
-						npcinfo[i].attacknext = ticks + 5000;
-						npcinfo[i].castpause = ticks + 3000;
+						npcinfo[i].pause = game_time + 3000;
+						npcinfo[i].attacknext = game_time + 5000;
+						npcinfo[i].castpause = game_time + 3000;
 
 						game_castspell(3, npcinfo[i].x, npcinfo[i].y, npcinfo[i].x, npcinfo[i].y, i);
 
@@ -5777,7 +6050,7 @@ void game_updnpcs()
 
 				// dragon2 specific
 				if(npcinfo[i].spriteset == 10 && npcinfo[i].attackattempt < ticks) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npx = npcinfo[i].x;
 						npy = npcinfo[i].y;
 
@@ -5802,7 +6075,7 @@ void game_updnpcs()
 
 				// endboss specific
 				if(npcinfo[i].spriteset == 11 && npcinfo[i].attackattempt < ticks) {
-					if(npcinfo[i].attacknext < ticks && npcinfo[i].pause < ticks && npcinfo[i].attacking == 0) {
+					if(npcinfo[i].attacknext < game_time && npcinfo[i].pause < game_time && npcinfo[i].attacking == 0) {
 						npx = npcinfo[i].x;
 						npy = npcinfo[i].y;
 
@@ -5838,7 +6111,7 @@ void game_updnpcs()
 			rcSrc.w = 3;
 			rcSrc.h = 3;
 
-			if(npcinfo[i].pause < ticks) SDL_FillRect(clipbg, &rcSrc, i);
+			if(npcinfo[i].pause < game_time) SDL_FillRect(clipbg, &rcSrc, i);
 
 
 			pass = 0;
@@ -5856,7 +6129,7 @@ void game_updnpcs()
 					if(npcinfo[i].attackframe >= 16) {
 						npcinfo[i].attackframe = 0;
 						npcinfo[i].attacking = 0;
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 					}
 
 					npcinfo[i].cattackframe = (int)(npcinfo[i].attackframe);
@@ -5869,8 +6142,8 @@ void game_updnpcs()
 
 					dist = 10;
 
-					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < ticks) {
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < game_time) {
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 						// npcinfo[i].attackframe = 0;
 						// npcinfo[i].attacking = 0;
 
@@ -5906,7 +6179,7 @@ void game_updnpcs()
 					if(npcinfo[i].attackframe >= 16) {
 						npcinfo[i].attackframe = 0;
 						npcinfo[i].attacking = 0;
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 					}
 
 					npcinfo[i].cattackframe = (int)(npcinfo[i].attackframe);
@@ -5919,8 +6192,8 @@ void game_updnpcs()
 
 					dist = 8;
 
-					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < ticks) {
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < game_time) {
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 						// npcinfo[i].attackframe = 0
 						// npcinfo[i].attacking = 0
 						damage = (float)npcinfo[i].attackdamage * (1.0 + (RND() * 0.5));
@@ -5957,7 +6230,7 @@ void game_updnpcs()
 							if(npcinfo[i].attackframe2[ff] >= 16) {
 								npcinfo[i].attackframe2[ff] = 0;
 								npcinfo[i].attacking2[ff] = 0;
-								npcinfo[i].attacknext2[ff] = ticks + npcinfo[i].attackdelay;
+								npcinfo[i].attacknext2[ff] = game_time + npcinfo[i].attackdelay;
 							}
 
 							npcinfo[i].cattackframe = (int)(npcinfo[i].attackframe);
@@ -5970,8 +6243,8 @@ void game_updnpcs()
 
 							dist = 8;
 
-							if(abs(xdif) < dist && abs(ydif) < dist && player.pause < ticks) {
-								npcinfo[i].attacknext2[ff] = ticks + npcinfo[i].attackdelay;
+							if(abs(xdif) < dist && abs(ydif) < dist && player.pause < game_time) {
+								npcinfo[i].attacknext2[ff] = game_time + npcinfo[i].attackdelay;
 								// npcinfo[i].attackframe2(ff) = 0
 								// npcinfo[i].attacking2(ff) = 0
 								damage = (float)npcinfo[i].attackdamage * (1.0 + RND() * 0.5);
@@ -6009,7 +6282,7 @@ void game_updnpcs()
 					if(npcinfo[i].attackframe >= 16) {
 						npcinfo[i].attackframe = 0;
 						npcinfo[i].attacking = 0;
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 					}
 
 					npcinfo[i].cattackframe = (int)(npcinfo[i].attackframe);
@@ -6022,8 +6295,8 @@ void game_updnpcs()
 
 					dist = 8;
 
-					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < ticks) {
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < game_time) {
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 						// npcinfo[i].attackframe = 0
 						// npcinfo[i].attacking = 0
 						damage = (float)npcinfo[i].attackdamage * (1.0 + RND() * 0.5);
@@ -6038,7 +6311,7 @@ void game_updnpcs()
 					if(npcinfo[i].attackframe >= 16) {
 						npcinfo[i].attackframe = 0;
 						npcinfo[i].attacking = 0;
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 					}
 
 					npcinfo[i].cattackframe = (int)(npcinfo[i].attackframe);
@@ -6051,8 +6324,8 @@ void game_updnpcs()
 
 					dist = 16 + npcinfo[i].attackframe;
 
-					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < ticks) {
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < game_time) {
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 						// npcinfo[i].attackframe = 0
 						// npcinfo[i].attacking = 0
 						damage = (float)npcinfo[i].attackdamage * (0.5 + RND() * 1.0);
@@ -6066,7 +6339,7 @@ void game_updnpcs()
 					if(npcinfo[i].attackframe >= 16) {
 						npcinfo[i].attackframe = 0;
 						npcinfo[i].attacking = 0;
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 					}
 
 					npcinfo[i].cattackframe = (int)(npcinfo[i].attackframe);
@@ -6079,8 +6352,8 @@ void game_updnpcs()
 
 					dist = 36;
 
-					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < ticks) {
-						npcinfo[i].attacknext = ticks + npcinfo[i].attackdelay;
+					if(abs(xdif) < dist && abs(ydif) < dist && player.pause < game_time) {
+						npcinfo[i].attacknext = game_time + npcinfo[i].attackdelay;
 						// npcinfo[i].attackframe = 0
 						// npcinfo[i].attacking = 0
 						damage = (float)npcinfo[i].attackdamage * (0.5 + RND() * 1.0);
@@ -6090,7 +6363,13 @@ void game_updnpcs()
 			}
 			// -------end fight code
 		}
+		if(ai_target == 0) realpause = player.pause;
 	}
+
+	player.px = realpx;
+	player.py = realpy;
+	player.pause = realpause;
+	ai_target = 0;
 }
 
 void game_updspells()
@@ -6101,8 +6380,19 @@ void game_updspells()
 	int ll[4][2];
 
 	float xloc = 0, yloc = 0, xst, yst, xdif, ydif;
+	float realpx = player.px, realpy = player.py;
+	int realpause = player.pause;
 
 	for(int i = 0; i < MAXSPELL; i++) {
+		ai_target = spellinfo[i].targetnpc;
+		player.px = realpx;
+		player.py = realpy;
+		player.pause = realpause;
+		if(ai_target > 0) {
+			player.px = npcinfo[ai_target].x;
+			player.py = npcinfo[ai_target].y;
+			player.pause = npcinfo[ai_target].pause;
+		}
 		if(spellinfo[i].frame > 0) {
 			int spellnum = spellinfo[i].spellnum;
 
@@ -6177,10 +6467,11 @@ void game_updspells()
 									ydif = (yloc + 16) - (npcinfo[e].y + 12);
 
 									if((abs(xdif) < 16 && abs(ydif) < 16)) {
-										float damage = (float)player.spelldamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
+										float basedamage = controlled_npc > 0 ? npcinfo[controlled_npc].spelldamage : player.spelldamage;
+							float damage = basedamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
 
-										if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) {
-											game_damagenpc(e, damage, 1);
+										if(npcinfo[e].hp > 0) {
+											game_spellhit(i, e, damage);
 											if(menabled == 1 && config.effects == 1) {
 												int snd = Mix_PlayChannel(-1, sfx[sndice], 0);
 												Mix_Volume(snd, config.effectsvol);
@@ -6257,10 +6548,11 @@ void game_updspells()
 						ydif = (yloc + 24) - (npcinfo[e].y + 12);
 
 						if((abs(xdif) < 24 && abs(ydif) < 24)) {
-							float damage = (float)player.spelldamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
+							float basedamage = controlled_npc > 0 ? npcinfo[controlled_npc].spelldamage : player.spelldamage;
+							float damage = basedamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
 
-							if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) {
-								game_damagenpc(e, damage, 1);
+							if(npcinfo[e].hp > 0) {
+								game_spellhit(i, e, damage);
 								if(menabled == 1 && config.effects == 1) {
 									int snd = Mix_PlayChannel(-1, sfx[sndmetalhit], 0);
 									Mix_Volume(snd, config.effectsvol);
@@ -6278,8 +6570,8 @@ void game_updspells()
 						npcinfo[npc].attackframe = 0;
 						npcinfo[npc].attacking = 0;
 
-						npcinfo[npc].pause = ticks + 1000;
-						npcinfo[npc].attacknext = ticks + 4000;
+						npcinfo[npc].pause = game_time + 1000;
+						npcinfo[npc].attacknext = game_time + 4000;
 					}
 					// ---------------
 
@@ -6289,15 +6581,15 @@ void game_updspells()
 						npcinfo[npc].attackframe = 0;
 						npcinfo[npc].attacking = 0;
 
-						npcinfo[npc].pause = ticks + 1000;
-						npcinfo[npc].attacknext = ticks + 3500;
+						npcinfo[npc].pause = game_time + 1000;
+						npcinfo[npc].attacknext = game_time + 3500;
 					}
 					// ---------------
 
 					xdif = (xloc + 24) - (player.px + 12);
 					ydif = (yloc + 24) - (player.py + 12);
 
-					if((abs(xdif) < 24 && abs(ydif) < 24) && player.pause < ticks) {
+					if((abs(xdif) < 24 && abs(ydif) < 24) && player.pause < game_time) {
 						npx = player.px;
 						npy = player.py;
 
@@ -6380,10 +6672,11 @@ void game_updspells()
 										ydif = (yloc + 16) - (npcinfo[e].y + 12);
 
 										if((abs(xdif) < 16 && abs(ydif) < 16)) {
-											float damage = (float)player.spelldamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
+											float basedamage = controlled_npc > 0 ? npcinfo[controlled_npc].spelldamage : player.spelldamage;
+							float damage = basedamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
 
-											if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) {
-												game_damagenpc(e, damage, 1);
+											if(npcinfo[e].hp > 0) {
+												game_spellhit(i, e, damage);
 												if(menabled == 1 && config.effects == 1) {
 													int snd = Mix_PlayChannel(-1, sfx[sndrocks], 0);
 													Mix_Volume(snd, config.effectsvol);
@@ -6454,7 +6747,7 @@ void game_updspells()
 				spellinfo[i].frame = spellinfo[i].frame - 0.3 * fpsr;
 				if(spellinfo[i].frame < 0) {
 					spellinfo[i].frame = 0;
-					forcepause = 0;
+					game_setpause(0);
 
 					npx = player.px + 12;
 					npy = player.py + 20;
@@ -6616,7 +6909,7 @@ void game_updspells()
 							xdif = (xloc + 8) - (player.px + 12);
 							ydif = (yloc + 8) - (player.py + 12);
 
-							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < ticks) {
+							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < game_time) {
 								float damage = npcinfo[spellinfo[i].npc].spelldamage * (1 + RND() * 0.5) / 3;
 
 								if(player.hp > 0) game_damageplayer(damage);
@@ -6670,7 +6963,7 @@ void game_updspells()
 								if((abs(xdif) < 8 && abs(ydif) < 8)) {
 									float damage = 30 * (1 + RND() * 0.5);
 
-									if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) game_damagenpc(e, damage, 1);
+									if(npcinfo[e].hp > 0) game_spellhit(i, e, damage);
 								}
 							}
 						}
@@ -6723,7 +7016,7 @@ void game_updspells()
 								if((abs(xdif) < 8 && abs(ydif) < 8)) {
 									float damage = 30 * (1 + RND() * 0.5);
 
-									if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) game_damagenpc(e, damage, 1);
+									if(npcinfo[e].hp > 0) game_spellhit(i, e, damage);
 								}
 							}
 						}
@@ -6775,7 +7068,7 @@ void game_updspells()
 								if((abs(xdif) < 8 && abs(ydif) < 8)) {
 									float damage = 30 * (1 + RND() * 0.5);
 
-									if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) game_damagenpc(e, damage, 1);
+									if(npcinfo[e].hp > 0) game_spellhit(i, e, damage);
 								}
 							}
 						}
@@ -6827,7 +7120,7 @@ void game_updspells()
 								if((abs(xdif) < 8 && abs(ydif) < 8)) {
 									float damage = 30 * (1 + RND() * 0.5);
 
-									if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) game_damagenpc(e, damage, 1);
+									if(npcinfo[e].hp > 0) game_spellhit(i, e, damage);
 								}
 							}
 						}
@@ -6859,7 +7152,7 @@ void game_updspells()
 				spellinfo[i].frame -= 0.5 * fpsr;
 				if(spellinfo[i].frame < 0) {
 					spellinfo[i].frame = 0;
-					forcepause = 0;
+					game_setpause(0);
 				}
 			}
 
@@ -6899,7 +7192,7 @@ void game_updspells()
 							xdif = (x + 8) - (player.px + 12);
 							ydif = (y + 8) - (player.py + 12);
 
-							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < ticks) {
+							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < game_time) {
 								float damage = ((float)player.hp * 0.75) * (RND() * 0.5 + 0.5);
 								if(damage < 5) damage = 5;
 
@@ -6908,6 +7201,21 @@ void game_updspells()
 								}
 
 								if(player.hp > 0) game_damageplayer(damage);
+							}
+						} else {
+							for(int e = 1; e <= lastnpc; e++) {
+								if(e == controlled_npc) continue;
+								xdif = (x + 8) - (npcinfo[e].x + 12);
+								ydif = (y + 8) - (npcinfo[e].y + 12);
+								if(abs(xdif) < 8 && abs(ydif) < 8 && npcinfo[e].hp > 0 && spellinfo[i].hitnext[e] <= game_time) {
+									float damage = npcinfo[controlled_npc].spelldamage * (1.0 + RND() * 0.5);
+									if(npcinfo[controlled_npc].spriteset == 12 && damage < 50) damage = 40 + RND() * 40;
+									game_spellhit(i, e, damage);
+									if(menabled == 1 && config.effects == 1) {
+										int snd = Mix_PlayChannel(-1, sfx[sndlightning], 0);
+										Mix_Volume(snd, config.effectsvol);
+									}
+								}
 							}
 						}
 					}
@@ -6918,11 +7226,16 @@ void game_updspells()
 					spellinfo[i].frame = 0;
 
 					npcinfo[spellinfo[i].npc].attacking = 0;
-					npcinfo[spellinfo[i].npc].attacknext = ticks + npcinfo[spellinfo[i].npc].attackdelay;
+					npcinfo[spellinfo[i].npc].attacknext = game_time + npcinfo[spellinfo[i].npc].attackdelay;
 				}
 			}
+			if(ai_target == 0) realpause = player.pause;
 		}
 	}
+	player.px = realpx;
+	player.py = realpy;
+	player.pause = realpause;
+	ai_target = 0;
 }
 
 
@@ -6935,6 +7248,7 @@ void game_updspellsunder()
 	if(forcepause == 1) return;
 
 	for(int i = 0; i < MAXSPELL; i++) {
+		ai_target = spellinfo[i].targetnpc;
 		if(spellinfo[i].frame > 0) {
 			int spellnum = spellinfo[i].spellnum;
 
@@ -6987,7 +7301,7 @@ void game_updspellsunder()
 						if(dq == 0) {
 							npcinfo[f].x = newx;
 							npcinfo[f].y = newy;
-							// npcinfo[f].castpause = ticks + 200;
+							// npcinfo[f].castpause = game_time + 200;
 						} else {
 							int xpass = 0;
 							int ypass = 0;
@@ -7016,7 +7330,7 @@ void game_updspellsunder()
 							if(xpass == 1 || ypass == 1) {
 								npcinfo[f].x = newx;
 								npcinfo[f].y = newy;
-								// npcinfo[f].castpause = ticks + 200;
+								// npcinfo[f].castpause = game_time + 200;
 							}
 						}
 					}
@@ -7069,12 +7383,13 @@ void game_updspellsunder()
 										float ydif = (yloc + 8) - (npcinfo[e].y + 12);
 
 										if((abs(xdif) < 8 && abs(ydif) < 8)) {
-											float damage = (float)player.spelldamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
+											float basedamage = controlled_npc > 0 ? npcinfo[controlled_npc].spelldamage : player.spelldamage;
+							float damage = basedamage * (1.0 + RND() * 0.5) * (float)spellinfo[i].strength;
 
 											if(npcinfo[e].spriteset == 5) damage = -damage;
 											if(npcinfo[e].spriteset == 11) damage = -damage;
-											if(npcinfo[e].hp > 0 && npcinfo[e].pause < ticks) {
-												game_damagenpc(e, damage, 1);
+											if(npcinfo[e].hp > 0) {
+												game_spellhit(i, e, damage);
 												if(menabled == 1 && config.effects == 1) {
 													int snd = Mix_PlayChannel(-1, sfx[sndfire], 0);
 													Mix_Volume(snd, config.effectsvol);
@@ -7088,7 +7403,7 @@ void game_updspellsunder()
 									float xdif = (xloc + 8) - (player.px + 12);
 									float ydif = (yloc + 8) - (player.py + 12);
 
-									if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < ticks) {
+									if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < game_time) {
 										float damage = (float)npcinfo[spellinfo[i].npc].spelldamage * (1.0 + RND() * 0.5);
 
 										if(player.hp > 0) {
@@ -7179,7 +7494,7 @@ void game_updspellsunder()
 							float xdif = (xloc + 8) - (player.px + 12);
 							float ydif = (yloc + 8) - (player.py + 12);
 
-							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < ticks && alpha > 64) {
+							if((abs(xdif) < 8 && abs(ydif) < 8) && player.pause < game_time && alpha > 64) {
 								float damage = (float)npcinfo[spellinfo[i].npc].spelldamage * (1.0 + RND() * 0.5);
 
 								if(player.hp > 0) {
@@ -7190,6 +7505,20 @@ void game_updspellsunder()
 									}
 								}
 
+							}
+						} else if(alpha > 64) {
+							for(int e = 1; e <= lastnpc; e++) {
+								if(e == controlled_npc) continue;
+								float xdif = (xloc + 8) - (npcinfo[e].x + 12);
+								float ydif = (yloc + 8) - (npcinfo[e].y + 12);
+								if(abs(xdif) < 8 && abs(ydif) < 8 && npcinfo[e].hp > 0 && spellinfo[i].hitnext[e] <= game_time) {
+									float damage = npcinfo[controlled_npc].spelldamage * (1.0 + RND() * 0.5);
+									game_spellhit(i, e, damage);
+									if(menabled == 1 && config.effects == 1) {
+										int snd = Mix_PlayChannel(-1, sfx[sndfire], 0);
+										Mix_Volume(snd, config.effectsvol);
+									}
+								}
 							}
 						}
 
@@ -7203,7 +7532,7 @@ void game_updspellsunder()
 
 				if(spellinfo[i].frame == 0) {
 					npcinfo[spellinfo[i].npc].attacking = 0;
-					npcinfo[spellinfo[i].npc].attacknext = ticks + npcinfo[spellinfo[i].npc].attackdelay;
+					npcinfo[spellinfo[i].npc].attacknext = game_time + npcinfo[spellinfo[i].npc].attackdelay;
 				}
 			}
 		}
@@ -7236,23 +7565,12 @@ void sys_initialize()
 
 	sys_initpaths();
 
-	// init char *floatstri[MAXFLOAT]
-	for(int i = 0; i < MAXFLOAT; i++)
+	// init char *floatstri[MAX_FLOATING_TEXTS]
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++)
 		floatstri[i] = malloc(64); // 64 bytes each string (should be enough)
 
 
-	// set default values
-	config.scr_width = 320;
-	config.scr_height = 240;
-	config.scr_bpp = 32;
-	config.hwaccel = 0;
-	config.hwsurface = SDL_SWSURFACE;
-	config.fullscreen = 0;
-	config.music = 1;
-	config.effects = 1;
-	config.musicvol = 127;
-	config.effectsvol = 127;
-
+	config_defaults(&config);
 	config_load(&config);
 
 	printf("SCR_WIDTH: %i\n", config.scr_width);
@@ -7269,7 +7587,10 @@ void sys_initialize()
 
 	atexit(SDL_Quit);
 
-	video = SDL_SetVideoMode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen); // SDL_FULLSCREEN
+	SDL_JoystickEventState(SDL_ENABLE);
+	if(SDL_NumJoysticks() > 0) SDL_JoystickOpen(0);
+
+	video = game_setvideomode(config.scr_width, config.scr_height, config.scr_bpp, fullscreen); // SDL_FULLSCREEN
 	if(!video) {
 		printf("Failed to init Video\n");
 		exit(1);
@@ -7291,32 +7612,29 @@ void sys_initialize()
 		char name[128];
 
 		sprintf(name, "art/map%i.bmp", i + 1);
-		mapimg[i] = SDL_DisplayFormat(video);
-		mapimg[i] = IMG_Load(name);
+		mapimg[i] = sys_loadimage(name);
 		SDL_SetColorKey(mapimg[i], SDL_SRCCOLORKEY, SDL_MapRGB(mapimg[i]->format, 255, 0, 255));
 	}
 
-	cloudimg = IMG_Load("art/clouds.bmp");
+	cloudimg = sys_loadimage("art/clouds.bmp");
 	SDL_SetColorKey(cloudimg, SDL_SRCCOLORKEY, SDL_MapRGB(cloudimg->format, 255, 0, 255));
 	SDL_SetAlpha(cloudimg, 0 | SDL_SRCALPHA, 96);
 
 
-	saveloadimg = IMG_Load("art/saveloadnew.bmp");
+	saveloadimg = sys_loadimage("art/saveloadnew.bmp");
 	SDL_SetColorKey(saveloadimg, SDL_SRCCOLORKEY, SDL_MapRGB(saveloadimg->format, 255, 0, 255));
 	SDL_SetAlpha(saveloadimg, 0 | SDL_SRCALPHA, 160);
 
-	titleimg = IMG_Load("art/titleb.bmp");
-	titleimg2 = IMG_Load("art/titlea.bmp");
+	titleimg = sys_loadimage("art/titleb.bmp");
+	titleimg2 = sys_loadimage("art/titlea.bmp");
 	SDL_SetColorKey(titleimg2, SDL_SRCCOLORKEY, SDL_MapRGB(titleimg2->format, 255, 0, 255));
 	//SDL_SetAlpha(titleimg2, 0 | SDL_SRCALPHA, 204);
 
-	inventoryimg = IMG_Load("art/inventory.bmp");
+	inventoryimg = sys_loadimage("art/inventory.bmp");
 	SDL_SetColorKey(inventoryimg, SDL_SRCCOLORKEY, SDL_MapRGB(inventoryimg->format, 255, 0, 255));
 
-	logosimg = SDL_DisplayFormat(video);
-	theendimg = SDL_DisplayFormat(video);
-	logosimg = IMG_Load("art/logos.bmp");
-	theendimg = IMG_Load("art/theend.bmp");
+	logosimg = sys_loadimage("art/logos.bmp");
+	theendimg = sys_loadimage("art/theend.bmp");
 
 
 	sys_LoadTiles();
@@ -7371,28 +7689,28 @@ void sys_line(SDL_Surface *buffer, int x1, int y1, int x2, int y2, int col)
 
 void sys_LoadAnims()
 {
-	spellimg = IMG_Load("art/spells.bmp");
+	spellimg = sys_loadimage("art/spells.bmp");
 	SDL_SetColorKey(spellimg, SDL_SRCCOLORKEY, SDL_MapRGB(spellimg->format, 255, 0, 255));
 
-	anims[0] = IMG_Load("art/anims0.bmp");
+	anims[0] = sys_loadimage("art/anims0.bmp");
 	SDL_SetColorKey(anims[0], SDL_SRCCOLORKEY, SDL_MapRGB(anims[0]->format, 255, 0, 255));
 
-	animsa[0] = IMG_Load("art/anims0a.bmp");
+	animsa[0] = sys_loadimage("art/anims0a.bmp");
 	SDL_SetColorKey(animsa[0], SDL_SRCCOLORKEY, SDL_MapRGB(animsa[0]->format, 255, 0, 255));
 
-	anims[13] = IMG_Load("art/anims0x.bmp");
+	anims[13] = sys_loadimage("art/anims0x.bmp");
 	SDL_SetColorKey(anims[13], SDL_SRCCOLORKEY, SDL_MapRGB(anims[13]->format, 255, 0, 255));
 
-	animsa[13] = IMG_Load("art/anims0xa.bmp");
+	animsa[13] = sys_loadimage("art/anims0xa.bmp");
 	SDL_SetColorKey(animsa[13], SDL_SRCCOLORKEY, SDL_MapRGB(animsa[13]->format, 255, 0, 255));
 
-	anims[1] = IMG_Load("art/anims1.bmp");
+	anims[1] = sys_loadimage("art/anims1.bmp");
 	SDL_SetColorKey(anims[1], SDL_SRCCOLORKEY, SDL_MapRGB(anims[1]->format, 255, 0, 255));
 
-	animsa[1] = IMG_Load("art/anims1a.bmp");
+	animsa[1] = sys_loadimage("art/anims1a.bmp");
 	SDL_SetColorKey(animsa[1], SDL_SRCCOLORKEY, SDL_MapRGB(animsa[1]->format, 255, 0, 255));
 
-	anims[2] = IMG_Load("art/anims2.bmp");
+	anims[2] = sys_loadimage("art/anims2.bmp");
 	SDL_SetColorKey(anims[2], SDL_SRCCOLORKEY, SDL_MapRGB(anims[2]->format, 255, 0, 255));
 
 	// huge
@@ -7438,7 +7756,7 @@ void sys_LoadAnims()
 	animset2[5].w = 42;
 	animset2[5].h = 36;
 
-	anims[9] = IMG_Load("art/anims9.bmp");
+	anims[9] = sys_loadimage("art/anims9.bmp");
 	SDL_SetColorKey(anims[9], SDL_SRCCOLORKEY, SDL_MapRGB(anims[9]->format, 255, 0, 255));
 
 	// huge
@@ -7484,37 +7802,37 @@ void sys_LoadAnims()
 	animset9[5].w = 42;
 	animset9[5].h = 36;
 
-	anims[3] = IMG_Load("art/anims3.bmp");
+	anims[3] = sys_loadimage("art/anims3.bmp");
 	SDL_SetColorKey(anims[3], SDL_SRCCOLORKEY, SDL_MapRGB(anims[3]->format, 255, 0, 255));
 
-	anims[4] = IMG_Load("art/anims4.bmp");
+	anims[4] = sys_loadimage("art/anims4.bmp");
 	SDL_SetColorKey(anims[4], SDL_SRCCOLORKEY, SDL_MapRGB(anims[4]->format, 255, 0, 255));
 
-	anims[5] = IMG_Load("art/anims5.bmp");
+	anims[5] = sys_loadimage("art/anims5.bmp");
 	SDL_SetColorKey(anims[5], SDL_SRCCOLORKEY, SDL_MapRGB(anims[5]->format, 255, 0, 255));
 
-	anims[6] = IMG_Load("art/anims6.bmp");
+	anims[6] = sys_loadimage("art/anims6.bmp");
 	SDL_SetColorKey(anims[6], SDL_SRCCOLORKEY, SDL_MapRGB(anims[6]->format, 255, 0, 255));
 
-	anims[7] = IMG_Load("art/anims7.bmp");
+	anims[7] = sys_loadimage("art/anims7.bmp");
 	SDL_SetColorKey(anims[7], SDL_SRCCOLORKEY, SDL_MapRGB(anims[7]->format, 255, 0, 255));
 
-	anims[8] = IMG_Load("art/anims8.bmp");
+	anims[8] = sys_loadimage("art/anims8.bmp");
 	SDL_SetColorKey(anims[8], SDL_SRCCOLORKEY, SDL_MapRGB(anims[8]->format, 255, 0, 255));
 
-	anims[10] = IMG_Load("art/anims10.bmp");
+	anims[10] = sys_loadimage("art/anims10.bmp");
 	SDL_SetColorKey(anims[10], SDL_SRCCOLORKEY, SDL_MapRGB(anims[10]->format, 255, 0, 255));
 
-	animsa[10] = IMG_Load("art/anims10a.bmp");
+	animsa[10] = sys_loadimage("art/anims10a.bmp");
 	SDL_SetColorKey(animsa[10], SDL_SRCCOLORKEY, SDL_MapRGB(animsa[10]->format, 255, 0, 255));
 
-	anims[11] = IMG_Load("art/anims11.bmp");
+	anims[11] = sys_loadimage("art/anims11.bmp");
 	SDL_SetColorKey(anims[11], SDL_SRCCOLORKEY, SDL_MapRGB(anims[11]->format, 255, 0, 255));
 
-	animsa[11] = IMG_Load("art/anims11a.bmp");
+	animsa[11] = sys_loadimage("art/anims11a.bmp");
 	SDL_SetColorKey(animsa[11], SDL_SRCCOLORKEY, SDL_MapRGB(animsa[11]->format, 255, 0, 255));
 
-	anims[12] = IMG_Load("art/anims12.bmp");
+	anims[12] = sys_loadimage("art/anims12.bmp");
 	SDL_SetColorKey(anims[12], SDL_SRCCOLORKEY, SDL_MapRGB(anims[12]->format, 255, 0, 255));
 }
 
@@ -7522,7 +7840,7 @@ void sys_LoadItemImgs()
 {
 	SDL_Surface *temp;
 
-	temp = IMG_Load("art/icons.bmp");
+	temp = sys_loadimage("art/icons.bmp");
 
 	for(int i = 0; i <= 20; i++) {
 		itemimg[i] = SDL_CreateRGBSurface(SDL_SWSURFACE, 16, 16, config.scr_bpp, video->format->Rmask, video->format->Gmask, video->format->Bmask, video->format->Amask);
@@ -7543,7 +7861,7 @@ void sys_LoadFont()
 {
 	SDL_Surface *font;
 
-	font = IMG_Load("art/font.bmp");
+	font = sys_loadimage("art/font.bmp");
 
 	for(int i = 32; i <= 255; i++)
 		for(int f = 0; f <= 4; f++) {
@@ -7571,15 +7889,15 @@ void sys_LoadFont()
 
 void sys_LoadTiles()
 {
-	tiles[0] = IMG_Load("art/tx.bmp");
-	tiles[1] = IMG_Load("art/tx1.bmp");
-	tiles[2] = IMG_Load("art/tx2.bmp");
-	tiles[3] = IMG_Load("art/tx3.bmp");
+	tiles[0] = sys_loadimage("art/tx.bmp");
+	tiles[1] = sys_loadimage("art/tx1.bmp");
+	tiles[2] = sys_loadimage("art/tx2.bmp");
+	tiles[3] = sys_loadimage("art/tx3.bmp");
 
 	for(int i = 0; i <= 3; i++)
 		SDL_SetColorKey(tiles[i], SDL_SRCCOLORKEY, SDL_MapRGB(tiles[i]->format, 255, 0, 255));
 
-	windowimg = IMG_Load("art/window.bmp");
+	windowimg = sys_loadimage("art/window.bmp");
 	SDL_SetColorKey(windowimg, SDL_SRCCOLORKEY, SDL_MapRGB(windowimg->format, 255, 0, 255));
 }
 
@@ -7659,11 +7977,16 @@ void sys_setupAudio()
 	menabled = 1;
 
 	if((Mix_Init(MIX_INIT_OGG) & MIX_INIT_OGG) != MIX_INIT_OGG) {
-		printf("Failed to init OGG support\n");
-		exit(1);
+		fprintf(stderr, "OGG support unavailable; continuing without audio\n");
+		menabled = 0;
+		return;
 	}
 
-	Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 2, 1024);
+	if(Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 2, 1024) != 0) {
+		fprintf(stderr, "Audio unavailable: %s; continuing without audio\n", Mix_GetError());
+		menabled = 0;
+		return;
+	}
 
 	atexit(Mix_Quit);
 	atexit(Mix_CloseAudio);
@@ -7671,7 +7994,7 @@ void sys_setupAudio()
 	char *stri = "Loading...";
 	sys_print(videobuffer, stri, 160 - 4 * strlen(stri), 116, 0);
 
-	loadimg = IMG_Load("art/load.bmp");
+	loadimg = sys_loadimage("art/load.bmp");
 	SDL_SetColorKey(loadimg, SDL_SRCCOLORKEY, SDL_MapRGB(loadimg->format, 255, 0, 255));
 
 	rcSrc.x = 0;
@@ -7694,51 +8017,53 @@ void sys_setupAudio()
 	rcDest.h = 8;
 
 	if(menabled == 1) {
-		mboss = Mix_LoadWAV("music/boss.ogg");
+		mboss = sys_loadchunk("music/boss.ogg");
 		sys_progress(1, 21);
-		mgardens = Mix_LoadWAV("music/gardens.ogg");
+		mgardens = sys_loadchunk("music/gardens.ogg");
 		sys_progress(2, 21);
-		mgardens2 = Mix_LoadWAV("music/gardens2.ogg");
+		mgardens2 = sys_loadchunk("music/gardens2.ogg");
 		sys_progress(3, 21);
-		mgardens3 = Mix_LoadWAV("music/gardens3.ogg");
+		mgardens3 = sys_loadchunk("music/gardens3.ogg");
 		sys_progress(4, 21);
-		mgardens4 = Mix_LoadWAV("music/gardens4.ogg");
+		mgardens4 = sys_loadchunk("music/gardens4.ogg");
 		sys_progress(5, 21);
-		mendofgame = Mix_LoadWAV("music/endofgame.ogg");
+		mendofgame = sys_loadchunk("music/endofgame.ogg");
 		sys_progress(6, 21);
-		mmenu = Mix_LoadWAV("music/menu.ogg");
+		mmenu = sys_loadchunk("music/menu.ogg");
 		sys_progress(7, 21);
 
-		sfx[0] = Mix_LoadWAV("sfx/bite.ogg");
+		sfx[0] = sys_loadchunk("sfx/bite.ogg");
 		sys_progress(8, 21);
-		sfx[1] = Mix_LoadWAV("sfx/crystal.ogg");
+		sfx[1] = sys_loadchunk("sfx/crystal.ogg");
 		sys_progress(9, 21);
-		sfx[2] = Mix_LoadWAV("sfx/door.ogg");
+		sfx[2] = sys_loadchunk("sfx/door.ogg");
 		sys_progress(10, 21);
-		sfx[3] = Mix_LoadWAV("sfx/enemyhit.ogg");
+		sfx[3] = sys_loadchunk("sfx/enemyhit.ogg");
 		sys_progress(11, 21);
-		sfx[4] = Mix_LoadWAV("sfx/ice.ogg");
+		sfx[4] = sys_loadchunk("sfx/ice.ogg");
 		sys_progress(12, 21);
-		sfx[5] = Mix_LoadWAV("sfx/lever.ogg");
+		sfx[5] = sys_loadchunk("sfx/lever.ogg");
 		sys_progress(13, 21);
-		sfx[6] = Mix_LoadWAV("sfx/lightning.ogg");
+		sfx[6] = sys_loadchunk("sfx/lightning.ogg");
 		sys_progress(14, 21);
-		sfx[7] = Mix_LoadWAV("sfx/metalhit.ogg");
+		sfx[7] = sys_loadchunk("sfx/metalhit.ogg");
 		sys_progress(15, 21);
-		sfx[8] = Mix_LoadWAV("sfx/powerup.ogg");
+		sfx[8] = sys_loadchunk("sfx/powerup.ogg");
 		sys_progress(16, 21);
-		sfx[9] = Mix_LoadWAV("sfx/rocks.ogg");
+		sfx[9] = sys_loadchunk("sfx/rocks.ogg");
 		sys_progress(17, 21);
-		sfx[10] = Mix_LoadWAV("sfx/swordhit.ogg");
+		sfx[10] = sys_loadchunk("sfx/swordhit.ogg");
 		sys_progress(18, 21);
-		sfx[11] = Mix_LoadWAV("sfx/throw.ogg");
+		sfx[11] = sys_loadchunk("sfx/throw.ogg");
 		sys_progress(19, 21);
-		sfx[12] = Mix_LoadWAV("sfx/chest.ogg");
+		sfx[12] = sys_loadchunk("sfx/chest.ogg");
 		sys_progress(20, 21);
-		sfx[13] = Mix_LoadWAV("sfx/fire.ogg");
+		sfx[13] = sys_loadchunk("sfx/fire.ogg");
 		sys_progress(21, 21);
-		sfx[14] = Mix_LoadWAV("sfx/beep.ogg");
+		sfx[14] = sys_loadchunk("sfx/beep.ogg");
 	}
+
+	SDL_FreeSurface(loadimg);
 }
 
 void sys_update()
@@ -7746,11 +8071,17 @@ void sys_update()
 	unsigned int *temp, bgc;
 	int pa, sx, sy;
 	float opx, opy, spd;
+	static int nextgamesecond;
 
 	SDL_Flip(video);
 	SDL_PumpEvents();
 
 	sys_tickcalc();
+	if(nextgamesecond == 0) nextgamesecond = ticks + 1000;
+	if(ticks >= nextgamesecond) {
+		secsingame++;
+		nextgamesecond = ticks + 1000;
+	}
 
 	SDL_LockSurface(clipbg);
 
@@ -7778,7 +8109,7 @@ void sys_update()
 				sy = (int)(player.py / 2 + 10);
 				temp = clipbg->pixels + sy * clipbg->pitch + sx * clipbg->format->BytesPerPixel;
 				bgc = *temp;
-				if(bgc > 0) {
+				if(!cheat_noclip && bgc > 0) {
 					player.px = opx;
 					player.py = opy;
 				}
@@ -7791,7 +8122,7 @@ void sys_update()
 		game_checkhit();
 	}
 
-	for(int i = 0; i < MAXFLOAT; i++) {
+	for(int i = 0; i < MAX_FLOATING_TEXTS; i++) {
 		if(floattext[i][0] > 0) {
 			spd = 0.5 * fpsr;
 			floattext[i][0] = floattext[i][0] - spd;
@@ -7818,7 +8149,7 @@ void sys_update()
 		if(player.maxhp > 999) player.maxhp = 999;
 		player.hp = player.maxhp;
 
-		player.sworddamage = player.level * 14 / 10;
+		player.sworddamage = player.level * 3 / 4;
 		player.spelldamage = player.level * 13 / 10;
 
 		if(menabled == 1 && config.effects == 1) {
@@ -7875,7 +8206,7 @@ void sys_update()
 		player.hpflash = 0;
 		player.hpflashb = player.hpflashb + 1;
 		if(player.hpflashb == 2) player.hpflashb = 0;
-		if(menabled == 1 && config.effects == 1 && player.hpflashb == 0 && player.hp < player.maxhp / 4) {
+		if(!cheat_god && menabled == 1 && config.effects == 1 && player.hpflashb == 0 && player.hp < player.maxhp / 4) {
 			int snd = Mix_PlayChannel(-1, sfx[sndbeep], 0);
 			Mix_Volume(snd, config.effectsvol);
 		}
@@ -7888,4 +8219,6 @@ void sys_update()
 
 	for(int i = 0; i <= 4; i++)
 		if(player.inventory[i] > 9) player.inventory[i] = 9;
+
+	if(forcepause == 0) game_time += tickspassed;
 }

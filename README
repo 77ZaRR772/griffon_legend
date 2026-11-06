@@ -1,3 +1,72 @@
+An improved version, as I felt it would be beneficial.
+
+• Makefiles have been verified and corrected.
+BUILDING example:
+make -f makefile.linux
+
+Balance and Gameplay
+• Reduced damage scaling per level:
+• Sword damage is now calculated as: level * 0.75.
+• Magic damage is now calculated as: level * 1.3.
+• Retained multipliers for discovered swords: upgraded swords now effectively increase damage output.
+• Verified shield and armor mechanics: each level provides an additional 5% damage reduction.
+• Moved the optional, randomized absence of enemies to `config.ini`:
+• `random_enemies: YES/NO` (disabled by default).
+• Note: Bosses do not respawn after being defeated.
+• The "Infinite Crystal" now also restores health based on the character's level.
+• Reworked how multiple simultaneous spell hits are handled:
+• Global temporary invulnerability no longer causes most hits to register as "miss!".
+• Each spell now has its own internal damage-application interval.
+• Ongoing (lingering) effects no longer deal all their damage instantaneously.
+
+Bug Fixes
+• Fixed an issue with the inventory pause: enemies no longer regenerate mana or progress their cooldowns while the game is paused.
+• Removed the pause that occurred when obtaining an item from a chest; the notification now appears and disappears while the game continues to run.
+• Fixed timer and control-related bugs that arose following the transition of game logic to frame-time-based calculations.
+• Fixed a corruption issue with the `MAXFLOAT` macro, which previously allowed enemies to deal damage multiple times within a single attack.
+• Fixed screen-darkening effects and final cutscenes for higher resolutions.
+• Fixed issues where enemies could regenerate mana or cast spells during pauses. • The crystal effect is no longer canceled when transitioning to another map.
+•Fixed `sdl_blitscale()`: transparency of the source surface is now preserved when using an increased resolution.
+As a result, fade transitions work once again—not just at 320×240, but also when scaling is applied.
+• Added fastfade parameter to `build/config.ini`:
+
+Quality of Life (QoL) and Interface
+• Added hotkeys, configurable via `config.ini`:
+• 1 — Crystal;
+• 2 — Ice;
+• 3 — Steel;
+• 4 — Wood;
+• 5 — Rock.
+• Key stats for sword, magic, and defense are now displayed in the inventory.
+• Game settings are saved when exiting via the Options menu; a single, clear "Exit" option is provided.
+• Added an image-scaling setting for fullscreen mode.
+• A confirmation prompt now appears when attempting to overwrite an existing save slot from the main menu.
+• The game prevents the use of healing potions when the character’s health is already full, thereby preserving the item.
+
+Engine and Graphics
+• Reworked the calculation of in-game time and movement speed relative to FPS.
+• Fixed issues with animations, delays, and cooldowns that were previously dependent on frame duration.
+• Added image scaling based on the selected resolution (native resolution / 2).
+• Cleaned up `griffon.h`:
+• Resolved the `MAXFLOAT` conflict.
+• Updated function prototypes to use `(void)` for empty argument lists.
+• Removed an implicit dependency on `SDL.h`.
+• Modularized the codebase: separated into core game logic, configuration, save systems, debugging tools, and the editor.
+• Simplified `config.c/.h`: parameters are now defined via a table, eliminating redundant code for loading and saving.
+
+Debugging and Monster Control
+Available when `showdbginfo` is enabled:
+
+• F10 — Noclip (no-collision mode);
+• F11 — God mode;
+• F12 — Map selection and loading;
+• F9 — Monster selection and toggling control between the player and a monster;
+• F8 — Infight: monsters will attack one another. • F7 — map editor (see F1 within the editor).
+As a precaution, make a backup of the `mapdb` folder.
+
+----
+
+
 
                             The Griffon Legend 
                             ==================
@@ -45,6 +114,19 @@ A      - attack
 B      - item menu
 SELECT - main menu
 
+Desktop controls
+================
+
+Arrows - moving
+Left Ctrl - attack/confirm
+Left Alt - item menu
+Esc - main menu
+Alt+Enter - fullscreen/window
+
+A gamepad can be used as well: left stick/D-pad to move, button 0 to attack,
+button 1 for items, buttons 6/9 for the main menu and buttons 2/7 to confirm.
+Keyboard bindings can be changed with key_up, key_down, key_left, key_right,
+key_attack, key_item and key_menu in config.ini. Values are SDL 1.2 key codes.
 
 Special thanks
 ==============
@@ -60,3 +142,6 @@ the necessities for a game of this style. Also any comments or criticism is
 always welcome at the syn9.thehideoutgames.com forums!
 
 Thank you for taking time to read this, and enjoy the game!
+
+---
+Thank YOU, syn9! You made great game!

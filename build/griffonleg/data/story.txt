@@ -1,0 +1,48 @@
+The Griffon Legend
+http://syn9.thehideoutgames.com/
+
+Programming/Graphics: Daniel Kennedy
+Music/Sound effects: David Turner
+
+Porting to GCW-Zero: Dmitry Smagin
+
+
+Story
+Ever since I was a child
+I remember being told the
+Legend of the Griffon Knights,
+who rid the world of the
+Dragon Empire.  These great
+heroes inspired us to become
+knights as well.
+ 
+Now, 500 years after the war
+ended, the Dragons have
+returned.  Cities are falling
+from the lack of knights to
+protect them.
+ 
+We never saw it coming.
+ 
+And now, here I am, making
+my way into the lower town
+of Fidelis, a small city on
+the main continent. The rest
+of my men have died over
+the last couple days from
+aerial attacks.
+ 
+We believed we could find
+shelter here, only to find
+every last griffon dead,
+the town burned to the ground,
+and transformed into a garrison
+for the Dragon forces.
+ 
+In these dark times, I try to
+draw strength from the stories
+of those knights that risked
+everything to protect their homeland,
+ 
+and hope that I can die
+with that honor as well.

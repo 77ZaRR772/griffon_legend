@@ -31,7 +31,7 @@ static int debug_mapexists(int mapnum)
 	FILE *fp;
 
 	sprintf(name, "mapdb/%04i.map", mapnum);
-	fp = fopen(name, "r");
+	fp = mods_fopen(name, "r");
 	if(!fp) return 0;
 	fclose(fp);
 	return 1;

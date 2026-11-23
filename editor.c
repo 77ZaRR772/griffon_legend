@@ -34,7 +34,7 @@ static int editor_save(int mapnum, int data[320][200], char *status)
 	sprintf(backup, "%s.bak", name);
 	sprintf(temporary, "%s.tmp", name);
 
-	fp = fopen(temporary, "w");
+	fp = mods_fopen(temporary, "w");
 	if(!fp) {
 		strcpy(status, "SAVE FAILED");
 		return 0;
@@ -71,7 +71,7 @@ static int editor_loadnpc(int mapnum, int npcdata[MAXNPC][11])
 	FILE *fp;
 
 	sprintf(name, "mapdb/%04i.npc", mapnum);
-	fp = fopen(name, "r");
+	fp = mods_fopen(name, "r");
 	if(!fp) return 0;
 	for(int i = 0; i < MAXNPC; i++) {
 		for(int j = 0; j < 11; j++) {
@@ -94,7 +94,7 @@ static int editor_loadtriggers(int mapnum, int triggerdata[20][15])
 	for(x = 0; x < 20; x++)
 		for(y = 0; y < 15; y++) triggerdata[x][y] = -1;
 	sprintf(name, "mapdb/%04i.trg", mapnum);
-	fp = fopen(name, "r");
+	fp = mods_fopen(name, "r");
 	if(!fp) return 0;
 	if(fscanf(fp, "%i", &count) != 1 || count < 0 || count > 10000) {
 		fclose(fp);
@@ -119,7 +119,7 @@ static int editor_savetriggers(int mapnum, int triggerdata[20][15], char *status
 	sprintf(name, "data/triggers.dat");
 	sprintf(backup, "%s.bak", name);
 	sprintf(temporary, "%s.tmp", name);
-	fp = fopen(temporary, "w");
+	fp = mods_fopen(temporary, "w");
 	if(!fp) {
 		strcpy(status, "TRIGGER SAVE FAILED");
 		return 0;
@@ -136,7 +136,7 @@ static int editor_savetriggers(int mapnum, int triggerdata[20][15], char *status
 	sprintf(name, "mapdb/%04i.trg", mapnum);
 	sprintf(backup, "%s.bak", name);
 	sprintf(temporary, "%s.tmp", name);
-	fp = fopen(temporary, "w");
+	fp = mods_fopen(temporary, "w");
 	if(!fp) {
 		strcpy(status, "TRIGGER SAVE FAILED");
 		return 0;
@@ -165,7 +165,7 @@ static int editor_savenpc(int mapnum, int npcdata[MAXNPC][11], char *status)
 	sprintf(name, "mapdb/%04i.npc", mapnum);
 	sprintf(backup, "%s.bak", name);
 	sprintf(temporary, "%s.tmp", name);
-	fp = fopen(temporary, "w");
+	fp = mods_fopen(temporary, "w");
 	if(!fp) {
 		strcpy(status, "NPC SAVE FAILED");
 		return 0;
@@ -197,6 +197,36 @@ static int editor_layer, editor_tileset, editor_tile = 1, editor_collision;
 static int editor_entitymode, editor_entitykind, editor_entity = 1, editor_showentities = 1;
 static int editor_keypause;
 static int cursorx, cursory, camerax, cameray;
+
+typedef struct {
+	int data[320][200];
+	int npcdata[MAXNPC][11];
+	int triggerdata[20][15];
+} EditorUndo;
+
+static EditorUndo undo[5];
+static int undo_count;
+
+static void editor_undo_push(int data[320][200], int npcdata[MAXNPC][11], int triggerdata[20][15])
+{
+	int count = undo_count < 5 ? undo_count : 4;
+	for(int i = count; i > 0; i--) memcpy(&undo[i], &undo[i - 1], sizeof(undo[i]));
+	memcpy(undo[0].data, data, sizeof(undo[0].data));
+	memcpy(undo[0].npcdata, npcdata, sizeof(undo[0].npcdata));
+	memcpy(undo[0].triggerdata, triggerdata, sizeof(undo[0].triggerdata));
+	if(undo_count < 5) undo_count++;
+}
+
+static int editor_undo(int data[320][200], int npcdata[MAXNPC][11], int triggerdata[20][15])
+{
+	if(undo_count == 0) return 0;
+	memcpy(data, undo[0].data, sizeof(undo[0].data));
+	memcpy(npcdata, undo[0].npcdata, sizeof(undo[0].npcdata));
+	memcpy(triggerdata, undo[0].triggerdata, sizeof(undo[0].triggerdata));
+	undo_count--;
+	for(int i = 0; i < undo_count; i++) memcpy(&undo[i], &undo[i + 1], sizeof(undo[i]));
+	return 1;
+}
 
 static void editor_outline(int x, int y, Uint32 color)
 {
@@ -516,19 +546,20 @@ static void editor_help(void)
 
 	for(;;) {
 		game_fillrect(videobuffer, 40, 16, 240, 208, 0);
-		sys_print(videobuffer, "EDITOR HELP", 120, 26, 3);
-		sys_print(videobuffer, "ARROWS: MOVE CURSOR", 52, 46, 0);
-		sys_print(videobuffer, "G: EDIT TELEPORT", 52, 58, 0);
-		sys_print(videobuffer, "T: TILE PALETTE (PGUP/DN: LAYER)", 52, 70, 0);
-		sys_print(videobuffer, "E: MONSTER/OBJECT SELECT", 52, 82, 0);
-		sys_print(videobuffer, "SHIFT+E: SHOW/HIDE ENTITIES", 52, 94, 0);
+		sys_print(videobuffer, "EDITOR HELP (F1)", 120, 26, 3);
+		sys_print(videobuffer, "F2: SHOW COLLISIONS/TRIGGERS", 52, 46, 0);
+		sys_print(videobuffer, "F3: SHOW/HIDE ENTITIES", 52, 58, 0);
+		sys_print(videobuffer, "ARROWS: MOVE CURSOR", 52, 70, 0);
+		sys_print(videobuffer, "1-3: SELECT LAYER", 52, 82, 0);
+		sys_print(videobuffer, "T: TILES (PGUP/DN: LAYER)", 52, 94, 0);
 		sys_print(videobuffer, "SHIFT: COPY TILE/ENTITY", 52, 106, 0);
-		sys_print(videobuffer, "C: SHOW COLLISIONS/TRIGGERS", 52, 118, 0);
-		sys_print(videobuffer, "CTRL: TOGGLE COLLISION", 52, 130, 0);
-		sys_print(videobuffer, "SPACE: PUT  DEL: CLEAR", 52, 142, 0);
-		sys_print(videobuffer, "S: SAVE WITH BACKUP", 52, 154, 0);
-		sys_print(videobuffer, "R: RELOAD MAP", 52, 166, 0);
-		sys_print(videobuffer, "ESC/F7: EXIT EDITOR", 52, 178, 0);
+		sys_print(videobuffer, "C: TOGGLE COLLISION", 52, 118, 0);
+		sys_print(videobuffer, "E: MONSTER/OBJECT SELECT", 52, 130, 0);
+		sys_print(videobuffer, "G: EDIT TELEPORT", 52, 142, 0);
+		sys_print(videobuffer, "SPACE: PUT  DEL: CLEAR LAYER", 52, 154, 0);
+		sys_print(videobuffer, "BACKSPACE: CLEAR ALL LAYERS", 52, 166, 0);
+		sys_print(videobuffer, "CTRL+Z: UNDO (5 STEPS)", 52, 178, 0);
+		sys_print(videobuffer, "S: SAVE  R: RELOAD  F7: EXIT", 52, 190, 0);
 		sys_print(videobuffer, "F1/ESC/ENTER: CLOSE", 72, 204, 4);
 		editor_present();
 		sys_pollevent();
@@ -599,13 +630,19 @@ static void editor_draw(int data[320][200], int npcdata[MAXNPC][11], int trigger
 		SDL_MapRGB(videobuffer->format, 255, 255, 0));
 
 	game_fillrect(videobuffer, 0, 230, 320, 8, 0);
-	if(editor_entitymode)
-		sprintf(line, "MAP %03i XY %02i,%02i ENTITY %s %02i F1 HELP", curmap, cursorx, cursory,
-			editor_entitykind ? "OBJ" : "NPC", editor_entity);
-	else
-		sprintf(line, "MAP %03i  XY %02i,%02i  L%i TS%i T%03i  F1 HELP",
-			curmap, cursorx, cursory, editor_layer + 1, editor_tileset, editor_tile);
+	sprintf(line, "MAP %03i XY %02i,%02i", curmap, cursorx, cursory);
 	sys_print(videobuffer, line, 4, 230, 0);
+	for(int layer = 0; layer < 3; layer++) {
+		if(data[layer * 40 + cursorx][cursory] > 0) {
+			sprintf(line, "L%i", layer + 1);
+			sys_print(videobuffer, line, 140 + layer * 24, 230, 0);
+		}
+	}
+	if(editor_entitymode)
+		sprintf(line, "%s %02i", editor_entitykind ? "OBJ" : "NPC", editor_entity);
+	else
+		sprintf(line, "TS%i T%03i", editor_tileset, editor_tile);
+	sys_print(videobuffer, line, 220, 230, 0);
 	if(status[0]) sys_print(videobuffer, (char *)status, 4, 200, 1);
 
 	if(editor_tile > 0) {
@@ -623,6 +660,7 @@ void editor_run(void)
 {
 	int data[320][200], npcdata[MAXNPC][11], triggerdata[20][15];
 	char name[64], status[64] = "";
+	undo_count = 0;
 	editor_keypause = ticks + 250;
 
 	sprintf(name, "mapdb/%04i.map", curmap);
@@ -654,19 +692,27 @@ void editor_run(void)
 				editor_picktile();
 				editor_keypause = ticks + 200;
 			}
-			if(key == SDLK_e && (event.key.keysym.mod & KMOD_SHIFT)) {
+			if(key == SDLK_F3) {
 				editor_showentities = !editor_showentities;
 			} else if(key == SDLK_e) {
 				editor_pickentity();
 				editor_keypause = ticks + 200;
 			}
+			if(key == SDLK_z && (event.key.keysym.mod & KMOD_CTRL)) {
+				if(editor_undo(data, npcdata, triggerdata)) strcpy(status, "UNDO");
+			}
 			if(key == SDLK_g && cursorx < 20 && cursory < 15) {
+				editor_undo_push(data, npcdata, triggerdata);
 				editor_collision = 1;
 				editor_edittrigger(triggerdata, cursorx, cursory, status);
 				editor_keypause = ticks + 200;
 			}
 			if(key == SDLK_COMMA && editor_tile > 1) editor_tile--;
 			if(key == SDLK_PERIOD) editor_tile++;
+			if(key >= SDLK_1 && key <= SDLK_3) {
+				editor_layer = key - SDLK_1;
+				editor_entitymode = 0;
+			}
 			if(key == SDLK_PAGEUP) {
 				editor_layer = (editor_layer + 1) % 3;
 				editor_entitymode = 0;
@@ -702,14 +748,16 @@ void editor_run(void)
 					}
 				}
 			}
-			if(key == SDLK_c) editor_collision = !editor_collision;
-			if(key == SDLK_LCTRL || key == SDLK_RCTRL) {
+			if(key == SDLK_F2) editor_collision = !editor_collision;
+			if(key == SDLK_c) {
+				editor_undo_push(data, npcdata, triggerdata);
 				if(data[120 + cursorx][cursory] % 2 != 0) data[120 + cursorx][cursory]--;
 				else data[120 + cursorx][cursory]++;
 				editor_collision = 1;
 				editor_keypause = ticks + 150;
 			}
 			if(key == SDLK_SPACE) {
+				editor_undo_push(data, npcdata, triggerdata);
 				if(editor_entitymode) editor_placeentity(data, npcdata, cursorx, cursory, status);
 				else {
 					data[editor_layer * 40 + cursorx][cursory] = editor_tile;
@@ -717,7 +765,13 @@ void editor_run(void)
 				}
 			}
 			if(key == SDLK_DELETE || key == SDLK_BACKSPACE) {
-				if(cursorx < 20 && cursory < 15 && triggerdata[cursorx][cursory] >= 0) {
+				editor_undo_push(data, npcdata, triggerdata);
+				if(key == SDLK_BACKSPACE) {
+					for(int layer = 0; layer < 3; layer++) {
+						data[layer * 40 + cursorx][cursory] = 0;
+						data[layer * 40 + cursorx][cursory + 40] = 0;
+					}
+				} else if(cursorx < 20 && cursory < 15 && triggerdata[cursorx][cursory] >= 0) {
 					triggerdata[cursorx][cursory] = -1;
 					strcpy(status, "TELEPORT REMOVED");
 				} else if(editor_entitymode) {
@@ -742,6 +796,7 @@ void editor_run(void)
 			if(cursory < cameray) cameray = cursory;
 			if(cursory >= cameray + 13) cameray = cursory - 12;
 		}
+		game_updmusic();
 		sys_tickcalc();
 	}
 

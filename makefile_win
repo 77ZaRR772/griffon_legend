@@ -10,7 +10,7 @@ INCS      = -I.
 LDFLAGS   =
 LIBS      = -lm -lSDL -lSDL_image -lSDL_mixer
 
-OBJS      = griffon.o config.o state.o debug.o editor.o
+OBJS      = griffon.o config.o state.o debug.o editor.o npc.o items.o spells.o render.o input.o mods.o
 
 # Magic starts here
 

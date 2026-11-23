@@ -208,6 +208,13 @@ typedef struct {
 	int	h;
 } ANIMSET2TYPE;
 
+#include "npc.h"
+#include "items.h"
+#include "spells.h"
+#include "render.h"
+#include "input.h"
+#include "mods.h"
+
 extern PLAYERTYPE player;
 extern SDL_Event event;
 extern int curmap;
@@ -241,6 +248,7 @@ int game_readmap(const char *name, int tempmap[320][200]);
 void game_setpause(int paused);
 void game_main(void);
 void game_newgame(void);
+void game_playsound(int sound);
 void game_playgame(void);
 void game_processtrigger(int trignum);
 void game_saveloadnew(void);
